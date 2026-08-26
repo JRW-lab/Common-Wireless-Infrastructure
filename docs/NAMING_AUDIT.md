@@ -366,16 +366,25 @@ MUSIC OTFS has ~16 fields removed when `channel_estimation_method == "none"`.
 
 ## Summary: Priority of Changes
 
-### Phase 1 — Safe Renames (no behavioral change, just clarity)
+### Phase 1a — Non-hash renames (safe, no hash impact)
 
-1. Rename `M` → `num_subcarriers`, `M_ary` → `mod_order` in all `default_parameters`
-2. Rename `T` → `Ts` in all `default_parameters`
-3. Rename `vel` → `velocity` in all `default_parameters`
-4. Rename `shape` → `pulse_shape` in all `default_parameters`
-5. Rename `Q` → `guard_interval` in all `default_parameters`
-6. Rename `U` → `num_users` in all `default_parameters`
-7. Rename `use_parellelization` → `use_parallel` in `app_settings`
-8. Rename `prvr_len` → `num_primary`, `conf_len` → `num_configs`, `primvar_sel` → `primary_idx`, `primvar_val` → `primary_val`, `sel` → `config_idx`, `p_sel` → `profile` in sim_head
+1. Rename `use_parellelization` → `use_parallel` in `app_settings`
+2. Rename `prvr_len` → `num_primary`, `conf_len` → `num_configs`, `primvar_sel` → `primary_idx`, `primvar_val` → `primary_val`, `sel` → `config_idx`, `p_sel` → `profile` in sim_head
+3. Rename matching `progress_bar_data` fields in `updateProgressBar.m`
+
+### Phase 1b — Hash-affecting parameter renames (DEFERRED — requires regenerating all MySQL results under new hashes)
+
+4. Rename `M` → `num_subcarriers`, `M_ary` → `mod_order` in all `default_parameters`
+5. Rename `T` → `Ts` in all `default_parameters`
+6. Rename `vel` → `velocity` in all `default_parameters`
+7. Rename `shape` → `pulse_shape` in all `default_parameters`
+8. Rename `Q` → `guard_interval` in all `default_parameters`
+9. Rename `U` → `num_users` in all `default_parameters`
+
+> **DEFERRED**: These renames change the JSON serialization of parameters, which
+> produces different SHA-256 hashes. All existing MySQL/Excel results would need
+> to be migrated to the new hash keys. Defer until all other naming issues are
+> resolved, then do a single coordinated migration.
 
 ### Phase 2 — Structural Changes (require testing)
 

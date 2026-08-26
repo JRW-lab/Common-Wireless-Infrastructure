@@ -5,9 +5,9 @@ bar_len = 50;
 
 % Create variables
 full_bar = char("⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀⠠⠐⠈⠈⠁⠂⠄⡀⢀");
-config_count = (d.primvar_sel - 1) * d.conf_len + d.sel;
-sim_count = config_count + (d.iter - 1) * d.prvr_len * d.conf_len;
-config_length = d.prvr_len * d.conf_len;
+config_count = (d.primary_idx - 1) * d.num_configs + d.config_idx;
+sim_count = config_count + (d.iter - 1) * d.num_primary * d.num_configs;
+config_length = d.num_primary * d.num_configs;
 sim_length = d.num_iters * config_length;
 pct = (sim_count / sim_length) * 100;
 filled_len = round(bar_len * sim_count / sim_length);
