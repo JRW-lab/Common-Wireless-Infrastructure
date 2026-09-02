@@ -437,13 +437,13 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.SavePriorityDropDown = uidropdown(app.StoragePanel);
             app.SavePriorityDropDown.Position = [80 96 90 22];
             app.SavePriorityDropDown.Items = {'local', 'mysql'};
-            app.SavePriorityDropDown.Value = 'local';
+            app.SavePriorityDropDown.Value = 'mysql';
             app.SavePriorityDropDown.Tooltip = 'Which existing results to check first when resuming a partially-simulated profile.';
 
             app.EnableMySQLCheckBox = uicheckbox(app.StoragePanel);
             app.EnableMySQLCheckBox.Text = 'Enable MySQL';
             app.EnableMySQLCheckBox.Position = [8 68 130 22];
-            app.EnableMySQLCheckBox.Value = false;
+            app.EnableMySQLCheckBox.Value = true;
 
             app.SaveExcelCheckBox = uicheckbox(app.StoragePanel);
             app.SaveExcelCheckBox.Text = 'Save Excel';
