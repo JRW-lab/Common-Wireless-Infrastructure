@@ -17,15 +17,20 @@ mark_val = 10;
 font_val = 16;
 figures_folder = 'Figures';
 
-%% Load data from DB
+%% Load data from DB, scoped to just this figure's own param_hashes
+% (an indexed lookup) rather than "*" (a full-table scan) - the results
+% table is shared across every project, so a full reload here would only
+% get slower as everyone else's history accumulates, and this can run
+% repeatedly per simulation (Generate Figure, plus every iteration when
+% Iteratively Render is on).
 switch save_data.priority
     case "mysql"
         if save_data.save_mysql
             try
-                T = mysql_load(conn, table_name, "*");
+                T = mysql_load(conn, table_name, hash_cell(:));
             catch
                 conn = mysql_login(conn.DataSource);
-                T = mysql_load(conn, table_name, "*");
+                T = mysql_load(conn, table_name, hash_cell(:));
             end
         elseif save_data.save_excel
             try
@@ -43,10 +48,10 @@ switch save_data.priority
             end
         elseif save_data.save_mysql
             try
-                T = mysql_load(conn, table_name, "*");
+                T = mysql_load(conn, table_name, hash_cell(:));
             catch
                 conn = mysql_login(conn.DataSource);
-                T = mysql_load(conn, table_name, "*");
+                T = mysql_load(conn, table_name, hash_cell(:));
             end
         end
 end

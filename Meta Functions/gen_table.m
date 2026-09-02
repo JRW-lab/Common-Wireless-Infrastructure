@@ -5,11 +5,12 @@ data_type = figure_data.data_type;
 primary_var = figure_data.primary_var;
 primary_vals = figure_data.primary_vals;
 
-% Load data from DB and set new frame count
+% Load data from DB, scoped to this table's own param_hashes rather than
+% "*" (a full-table scan of the results table shared across every project)
 switch save_data.priority
     case "mysql"
         if save_data.save_mysql
-            T = mysql_load(conn,table_name,"*");
+            T = mysql_load(conn,table_name,hash_cell(:));
         elseif save_data.save_excel
             try
                 T = readtable(save_data.excel_path, 'TextType', 'string');
@@ -25,7 +26,7 @@ switch save_data.priority
                 T = table;
             end
         elseif save_data.save_mysql
-            T = mysql_load(conn,table_name,"*");
+            T = mysql_load(conn,table_name,hash_cell(:));
         end
 end
 
