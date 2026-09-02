@@ -8,7 +8,8 @@ Shared MATLAB functions used across multiple wireless communications simulation 
 
 | Function | Purpose |
 |----------|---------|
-| `mysql_login.m` | Connect to MySQL (tries localhost root, then remote_user with retry) |
+| `mysql_login.m` | Connect to MySQL using this machine's locally-configured credentials (auto-provisions the database if it doesn't exist) |
+| `get_mysql_credentials.m` | First-run interactive setup - detects a local MySQL server and caches credentials in a git-ignored `mysql_local.json` |
 | `mysql_load.m` | Fetch rows from MySQL by param_hash |
 | `mysql_write.m` | Insert/update with weighted-averaged metric merging (optional mutex) |
 | `mysql_check.m` | Read flag from system_flags table |
@@ -37,6 +38,18 @@ Shared MATLAB functions used across multiple wireless communications simulation 
 |----------|---------|
 | `profile_select.m` | Interactive console menu for profile selection |
 | `figure_settings.m` | Interactive console prompt for figure rendering settings |
+
+## MySQL Setup (First Run)
+
+No credentials are stored in this repository. The first time a project enables MySQL storage, `mysql_login.m` walks you through a one-time setup:
+
+1. It checks whether a MySQL server is running on `localhost:3306`.
+2. If found, it asks for that server's password (assumes the `root` user).
+3. If not found, it asks for a remote host to connect to instead - or you can just press Enter to skip and use local Excel storage only.
+4. Once a connection succeeds, the credentials are cached in `mysql_local.json` at the consuming project's root (already covered by `.gitignore` - never committed) and reused silently on every run after that.
+5. The target database schema (e.g. `comm_database`) is created automatically if it doesn't already exist.
+
+To reconfigure (e.g. a new password), delete `mysql_local.json` and re-run.
 
 ## Usage as a Submodule
 
