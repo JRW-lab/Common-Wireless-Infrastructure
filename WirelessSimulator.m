@@ -4,6 +4,13 @@ classdef WirelessSimulator < matlab.apps.AppBase
     %
     % Works with any project that implements saved_profiles() and sim_head(app_settings).
 
+    % Every project now writes to this one merged results table (server-side
+    % consolidation of the old per-project results_twc/results_music/
+    % otfs_journal/sim_results tables) - it's fixed, not a GUI option.
+    properties (Constant, Access = private)
+        ResultsTableName = 'sim_lookup'
+    end
+
     % Internal state (not UI components)
     properties (Access = private)
         AllProfiles     cell = {}
@@ -24,6 +31,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
         % Content header
         ProfileTitleLabel                matlab.ui.control.Label
         ProfileSubtitleLabel             matlab.ui.control.Label
+        ProfileDetailsButton             matlab.ui.control.Button
 
         % Run card
         RunPanel                         matlab.ui.container.Panel
@@ -42,8 +50,8 @@ classdef WirelessSimulator < matlab.apps.AppBase
         SavePriorityDropDownLabel        matlab.ui.control.Label
         EnableMySQLCheckBox              matlab.ui.control.CheckBox
         SaveExcelCheckBox                matlab.ui.control.CheckBox
-        DatabaseTableDropDown            matlab.ui.control.DropDown
-        DatabaseTableDropDownLabel       matlab.ui.control.Label
+        ResultsTableCaptionLabel         matlab.ui.control.Label
+        ResultsTableValueLabel           matlab.ui.control.Label
 
         % Adaptive stopping card
         ConvergencePanel                 matlab.ui.container.Panel
@@ -61,7 +69,8 @@ classdef WirelessSimulator < matlab.apps.AppBase
         FigureStatisticDropDownLabel     matlab.ui.control.Label
 
         % Status strip + actions
-        ProgressGauge                    matlab.ui.control.LinearGauge
+        ProgressTrackPanel               matlab.ui.container.Panel
+        ProgressFillPanel                matlab.ui.container.Panel
         StatusLine1Label                 matlab.ui.control.Label
         StatusLine2Label                 matlab.ui.control.Label
         SimulateButton                   matlab.ui.control.Button
@@ -73,7 +82,6 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
         function startupFcn(app)
             refreshProfiles(app);
-            refreshDatabaseTables(app);
             setStatus(app, "Ready.", false);
         end
 
@@ -153,26 +161,33 @@ classdef WirelessSimulator < matlab.apps.AppBase
             setStatus(app, "Profiles reloaded.", false);
         end
 
-        %% Database table list
-
-        function refreshDatabaseTables(app)
-            % Populate known table names from any Excel files already saved
-            % under Data/, so the dropdown reflects this project's actual
-            % history instead of a hardcoded, cross-project list.
-            found = {};
-            if isfolder('Data')
-                listing = dir(fullfile('Data', '*.xlsx'));
-                for i = 1:numel(listing)
-                    [~, name] = fileparts(listing(i).name);
-                    if ~startsWith(name, '~')
-                        found{end+1} = name; %#ok<AGROW>
-                    end
-                end
+        function ProfileDetailsButtonPushed(app, ~)
+            idx = app.ProfileListBox.Value;
+            if isempty(idx) || idx < 1 || idx > numel(app.AllProfiles)
+                return;
             end
-            current = app.DatabaseTableDropDown.Value;
-            items = unique([found, {current}], 'stable');
-            app.DatabaseTableDropDown.Items = items;
-            app.DatabaseTableDropDown.Value = current;
+            name = app.AllProfileNames{idx};
+            profile = app.AllProfiles{idx};
+            try
+                bodyText = jsonencode(profile, 'PrettyPrint', true);
+            catch
+                bodyText = evalc('disp(profile)');
+            end
+
+            detailFig = uifigure('Name', "Profile Details - " + name);
+            detailFig.Position = [200 120 620 600];
+
+            titleLabel = uilabel(detailFig);
+            titleLabel.Position = [16 560 588 24];
+            titleLabel.FontWeight = 'bold';
+            titleLabel.FontSize = 14;
+            titleLabel.Text = name;
+
+            detailArea = uitextarea(detailFig);
+            detailArea.Position = [16 16 588 534];
+            detailArea.Editable = 'off';
+            detailArea.FontName = 'Consolas';
+            detailArea.Value = cellstr(splitlines(string(bodyText)));
         end
 
         %% Status / progress
@@ -187,13 +202,21 @@ classdef WirelessSimulator < matlab.apps.AppBase
             drawnow;
         end
 
+        function setProgressFraction(app, frac)
+            frac = max(0, min(1, frac));
+            trackWidth = app.ProgressTrackPanel.Position(3);
+            pos = app.ProgressFillPanel.Position;
+            pos(3) = max(1, round(frac * trackWidth));
+            app.ProgressFillPanel.Position = pos;
+        end
+
         function handleProgress(app, d)
             try
                 config_count = (d.primary_idx - 1) * d.num_configs + d.config_idx;
                 sim_count = config_count + (d.iter - 1) * d.num_primary * d.num_configs;
                 config_length = d.num_primary * d.num_configs;
                 sim_length = d.num_iters * config_length;
-                app.ProgressGauge.Value = max(0, min(100, 100 * sim_count / sim_length));
+                setProgressFraction(app, sim_count / sim_length);
                 app.StatusLine1Label.Text = sprintf('Config %d/%d - %s (%s) - frame %d/%d', ...
                     config_count, config_length, d.system_name, d.receiver_name, ...
                     d.current_frames, d.num_frames);
@@ -216,7 +239,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
         %% Settings + run
 
         function settings = buildSettings(app)
-            settings.table_name          = app.DatabaseTableDropDown.Value;
+            settings.table_name          = app.ResultsTableName;
             settings.use_parallel        = app.ParallelizationCheckBox.Value;
             settings.frames_per_iter     = app.TrialsPerIterationEditField.Value;
             settings.priority            = app.SavePriorityDropDown.Value;
@@ -242,7 +265,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
                 return;
             end
             settings = buildSettings(app);
-            app.ProgressGauge.Value = 0;
+            setProgressFraction(app, 0);
             app.StatusLine2Label.Text = '';
             setStatus(app, "Simulating...", false);
             finish_flag = false;
@@ -258,7 +281,6 @@ classdef WirelessSimulator < matlab.apps.AppBase
                     finish_flag = sim_head(settings);
                 end
             end
-            refreshDatabaseTables(app);
             setStatus(app, "Done.", false);
         end
 
@@ -338,8 +360,14 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.ProfileTitleLabel = uilabel(app.UIFigure);
             app.ProfileTitleLabel.FontWeight = 'bold';
             app.ProfileTitleLabel.FontSize = 15;
-            app.ProfileTitleLabel.Position = [266 484 664 24];
+            app.ProfileTitleLabel.Position = [266 484 550 24];
             app.ProfileTitleLabel.Text = 'No profile selected';
+
+            app.ProfileDetailsButton = uibutton(app.UIFigure, 'push');
+            app.ProfileDetailsButton.ButtonPushedFcn = createCallbackFcn(app, @ProfileDetailsButtonPushed, true);
+            app.ProfileDetailsButton.Position = [826 485 94 22];
+            app.ProfileDetailsButton.Text = 'Details';
+            app.ProfileDetailsButton.Tooltip = 'Open the full profile definition (parameters, configs, plot settings) in a new window.';
 
             app.ProfileSubtitleLabel = uilabel(app.UIFigure);
             app.ProfileSubtitleLabel.FontColor = [0.45 0.45 0.45];
@@ -414,25 +442,30 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
             app.EnableMySQLCheckBox = uicheckbox(app.StoragePanel);
             app.EnableMySQLCheckBox.Text = 'Enable MySQL';
-            app.EnableMySQLCheckBox.Position = [186 96 130 22];
+            app.EnableMySQLCheckBox.Position = [8 68 130 22];
             app.EnableMySQLCheckBox.Value = false;
 
             app.SaveExcelCheckBox = uicheckbox(app.StoragePanel);
             app.SaveExcelCheckBox.Text = 'Save Excel';
-            app.SaveExcelCheckBox.Position = [8 68 100 22];
+            app.SaveExcelCheckBox.Position = [8 40 100 22];
             app.SaveExcelCheckBox.Value = true;
 
-            app.DatabaseTableDropDownLabel = uilabel(app.StoragePanel);
-            app.DatabaseTableDropDownLabel.HorizontalAlignment = 'right';
-            app.DatabaseTableDropDownLabel.Position = [8 32 68 20];
-            app.DatabaseTableDropDownLabel.Text = 'Table';
+            resultsTableBox = uipanel(app.StoragePanel);
+            resultsTableBox.BorderType = 'line';
+            resultsTableBox.BackgroundColor = [0.957 0.973 0.984];
+            resultsTableBox.Position = [8 6 300 28];
 
-            app.DatabaseTableDropDown = uidropdown(app.StoragePanel);
-            app.DatabaseTableDropDown.Position = [80 32 236 22];
-            app.DatabaseTableDropDown.Editable = 'on';
-            app.DatabaseTableDropDown.Items = {'results_TWC'};
-            app.DatabaseTableDropDown.Value = 'results_TWC';
-            app.DatabaseTableDropDown.Tooltip = 'Name of the Excel sheet / SQL table results are stored in. Type a new name to start a fresh table.';
+            app.ResultsTableCaptionLabel = uilabel(resultsTableBox);
+            app.ResultsTableCaptionLabel.Position = [8 1 100 26];
+            app.ResultsTableCaptionLabel.FontSize = 9;
+            app.ResultsTableCaptionLabel.FontColor = [0.29 0.48 0.61];
+            app.ResultsTableCaptionLabel.Text = 'RESULTS TABLE';
+
+            app.ResultsTableValueLabel = uilabel(resultsTableBox);
+            app.ResultsTableValueLabel.Position = [110 1 180 26];
+            app.ResultsTableValueLabel.FontColor = [0.04 0.24 0.36];
+            app.ResultsTableValueLabel.Text = app.ResultsTableName;
+            app.ResultsTableValueLabel.Tooltip = 'Every project writes to this one shared, merged results table - it is not a per-run choice.';
 
             %% Adaptive stopping card
             app.ConvergencePanel = uipanel(app.UIFigure);
@@ -493,11 +526,15 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view.';
 
             %% Status strip
-            app.ProgressGauge = uigauge(app.UIFigure, 'linear');
-            app.ProgressGauge.Position = [266 64 150 30];
-            app.ProgressGauge.Limits = [0 100];
-            app.ProgressGauge.ScaleColors = {[0 0.4470 0.7410]};
-            app.ProgressGauge.ScaleColorLimits = [0 100];
+            app.ProgressTrackPanel = uipanel(app.UIFigure);
+            app.ProgressTrackPanel.BorderType = 'line';
+            app.ProgressTrackPanel.BackgroundColor = [0.87 0.87 0.87];
+            app.ProgressTrackPanel.Position = [266 68 150 20];
+
+            app.ProgressFillPanel = uipanel(app.ProgressTrackPanel);
+            app.ProgressFillPanel.BorderType = 'none';
+            app.ProgressFillPanel.BackgroundColor = [0.16 0.63 0.27];
+            app.ProgressFillPanel.Position = [0 0 1 20];
 
             app.StatusLine1Label = uilabel(app.UIFigure);
             app.StatusLine1Label.Position = [426 68 504 22];
