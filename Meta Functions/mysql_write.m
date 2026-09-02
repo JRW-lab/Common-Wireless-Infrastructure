@@ -10,10 +10,20 @@ if length(varargin) >= 2
     metrics_aux_new = varargin{2};
 end
 
-% Ensure metrics_aux column exists
-try
-    execute(conn, "ALTER TABLE " + table_name + " ADD COLUMN metrics_aux JSON NULL");
-catch
+% Ensure metrics_aux column exists - this is called once per simulated
+% point per iteration (potentially hundreds of times per run), so cache
+% per table_name for the rest of the session instead of re-attempting
+% (and failing on "duplicate column") an ALTER TABLE every single call.
+persistent metrics_aux_ready
+if isempty(metrics_aux_ready)
+    metrics_aux_ready = containers.Map('KeyType', 'char', 'ValueType', 'logical');
+end
+if ~isKey(metrics_aux_ready, char(table_name))
+    try
+        execute(conn, "ALTER TABLE " + table_name + " ADD COLUMN metrics_aux JSON NULL");
+    catch
+    end
+    metrics_aux_ready(char(table_name)) = true;
 end
 
 % Function setup
