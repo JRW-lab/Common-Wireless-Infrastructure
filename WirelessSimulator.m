@@ -7,24 +7,26 @@ classdef WirelessSimulator < matlab.apps.AppBase
     % UI Components
     properties (Access = public)
         UIFigure                         matlab.ui.Figure
+        DataPanel                        matlab.ui.container.Panel
         DatabaseTableDropDown            matlab.ui.control.DropDown
         DatabaseTableDropDownLabel       matlab.ui.control.Label
         SavePriorityDropDown             matlab.ui.control.DropDown
         SavePriorityDropDownLabel        matlab.ui.control.Label
         EnableMySQLCheckBox              matlab.ui.control.CheckBox
         SaveExcelCheckBox                matlab.ui.control.CheckBox
-        ParallelizationCheckBox          matlab.ui.control.CheckBox
+        SimPanel                         matlab.ui.container.Panel
+        ProfileSelectDropDown            matlab.ui.control.DropDown
+        ProfileSelectDropDownLabel       matlab.ui.control.Label
+        ReloadProfilesButton             matlab.ui.control.Button
         IterativelyRenderCheckBox        matlab.ui.control.CheckBox
-        DeleteSelectedConfigsCheckBox    matlab.ui.control.CheckBox
-        IgnoreErrorsCheckBox             matlab.ui.control.CheckBox
         NumberofTrialsEditField          matlab.ui.control.NumericEditField
         NumberofTrialsEditFieldLabel     matlab.ui.control.Label
         TrialsPerIterationEditField      matlab.ui.control.NumericEditField
         TrialsPerIterationEditFieldLabel matlab.ui.control.Label
-        ProfileSelectDropDown            matlab.ui.control.DropDown
-        ProfileSelectDropDownLabel       matlab.ui.control.Label
-        FigureStatisticDropDown          matlab.ui.control.DropDown
-        FigureStatisticDropDownLabel     matlab.ui.control.Label
+        ParallelizationCheckBox          matlab.ui.control.CheckBox
+        IgnoreErrorsCheckBox             matlab.ui.control.CheckBox
+        DeleteSelectedConfigsCheckBox    matlab.ui.control.CheckBox
+        ConvergencePanel                 matlab.ui.container.Panel
         EnableAdaptiveCheckBox           matlab.ui.control.CheckBox
         ToleranceEditField               matlab.ui.control.NumericEditField
         ToleranceEditFieldLabel          matlab.ui.control.Label
@@ -32,7 +34,10 @@ classdef WirelessSimulator < matlab.apps.AppBase
         MinFramesEditFieldLabel          matlab.ui.control.Label
         ConfidenceDropDown               matlab.ui.control.DropDown
         ConfidenceDropDownLabel          matlab.ui.control.Label
-        ReloadProfilesButton             matlab.ui.control.Button
+        FigurePanel                      matlab.ui.container.Panel
+        FigureStatisticDropDown          matlab.ui.control.DropDown
+        FigureStatisticDropDownLabel     matlab.ui.control.Label
+        StatusLabel                      matlab.ui.control.Label
         SimulateButton                   matlab.ui.control.Button
         GenerateFigureButton             matlab.ui.control.Button
     end
@@ -41,16 +46,48 @@ classdef WirelessSimulator < matlab.apps.AppBase
     methods (Access = private)
 
         function startupFcn(app)
+            refreshProfiles(app);
+            refreshDatabaseTables(app);
+            setStatus(app, "Ready.", false);
+        end
+
+        function refreshProfiles(app)
             [~, profile_names] = saved_profiles();
-            fprintf("\n+----+--------------------------------------+\n");
-            fprintf("| #  | Profile Name                         |\n");
-            fprintf("+----+--------------------------------------+\n");
-            for i = 1:numel(profile_names)
-                fprintf("| %2d | %-37s |\n", i, profile_names{i});
+            app.ProfileSelectDropDown.Items = profile_names;
+            app.ProfileSelectDropDown.ItemsData = num2cell(1:numel(profile_names));
+            if ~isempty(profile_names)
+                app.ProfileSelectDropDown.Value = 1;
             end
-            fprintf("+----+--------------------------------------+\n\n");
-            app.ProfileSelectDropDown.Items = ...
-                arrayfun(@num2str, 1:numel(profile_names), 'UniformOutput', false);
+        end
+
+        function refreshDatabaseTables(app)
+            % Populate known table names from any Excel files already saved
+            % under Data/, so the dropdown reflects this project's actual
+            % history instead of a hardcoded, cross-project list.
+            found = {};
+            if isfolder('Data')
+                listing = dir(fullfile('Data', '*.xlsx'));
+                for i = 1:numel(listing)
+                    [~, name] = fileparts(listing(i).name);
+                    if ~startsWith(name, '~')
+                        found{end+1} = name; %#ok<AGROW>
+                    end
+                end
+            end
+            current = app.DatabaseTableDropDown.Value;
+            items = unique([found, {current}], 'stable');
+            app.DatabaseTableDropDown.Items = items;
+            app.DatabaseTableDropDown.Value = current;
+        end
+
+        function setStatus(app, msg, isError)
+            app.StatusLabel.Text = char(msg);
+            if isError
+                app.StatusLabel.FontColor = [0.72 0.11 0.11];
+            else
+                app.StatusLabel.FontColor = [0.15 0.15 0.15];
+            end
+            drawnow;
         end
 
         function settings = buildSettings(app)
@@ -60,7 +97,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.priority            = app.SavePriorityDropDown.Value;
             settings.save_mysql          = app.EnableMySQLCheckBox.Value;
             settings.save_excel          = app.SaveExcelCheckBox.Value;
-            settings.profile_sel         = str2double(app.ProfileSelectDropDown.Value);
+            settings.profile_sel         = app.ProfileSelectDropDown.Value;
             settings.num_frames          = app.NumberofTrialsEditField.Value;
             settings.iteratively_render  = app.IterativelyRenderCheckBox.Value;
             settings.delete_sel          = app.DeleteSelectedConfigsCheckBox.Value;
@@ -68,24 +105,27 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.enable_adaptive     = app.EnableAdaptiveCheckBox.Value;
             settings.relative_tolerance  = app.ToleranceEditField.Value;
             settings.min_frames          = app.MinFramesEditField.Value;
-            settings.confidence          = str2double(app.ConfidenceDropDown.Value);
+            settings.confidence          = app.ConfidenceDropDown.Value;
         end
 
         function SimulateButtonPushed(app, ~)
             settings = buildSettings(app);
+            setStatus(app, "Simulating...", false);
             finish_flag = false;
             while ~finish_flag
                 if app.IgnoreErrorsCheckBox.Value
                     try
                         finish_flag = sim_head(settings);
                     catch ME
-                        fprintf("Error: %s\nRetry in 5s...\n", ME.message);
+                        setStatus(app, "Error: " + ME.message + " (retrying in 5s...)", true);
                         pause(5);
                     end
                 else
                     finish_flag = sim_head(settings);
                 end
             end
+            refreshDatabaseTables(app);
+            setStatus(app, "Done.", false);
         end
 
         function GenerateFigureButtonPushed(app, ~)
@@ -94,11 +134,18 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.num_frames         = 0;
             settings.iteratively_render = false;
             settings.delete_sel         = false;
-            sim_head(settings);
+            setStatus(app, "Generating figure...", false);
+            try
+                sim_head(settings);
+                setStatus(app, "Figure generated.", false);
+            catch ME
+                setStatus(app, "Error: " + ME.message, true);
+            end
         end
 
         function ReloadProfilesButtonPushed(app, ~)
-            startupFcn(app);
+            refreshProfiles(app);
+            setStatus(app, "Profiles reloaded.", false);
         end
     end
 
@@ -124,166 +171,187 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
             % Create figure
             app.UIFigure = uifigure('Visible', 'off');
-            app.UIFigure.Position = [100 100 400 530];
+            app.UIFigure.Position = [100 60 460 660];
             app.UIFigure.Name = 'Wireless Simulator';
 
-            % Database Table (y=363)
-            app.DatabaseTableDropDownLabel = uilabel(app.UIFigure);
+            %% Data & Storage panel
+            app.DataPanel = uipanel(app.UIFigure);
+            app.DataPanel.Title = 'Data & Storage';
+            app.DataPanel.Position = [20 540 420 100];
+
+            app.DatabaseTableDropDownLabel = uilabel(app.DataPanel);
             app.DatabaseTableDropDownLabel.HorizontalAlignment = 'right';
-            app.DatabaseTableDropDownLabel.Position = [91 493 88 22];
+            app.DatabaseTableDropDownLabel.Position = [10 52 88 22];
             app.DatabaseTableDropDownLabel.Text = 'Database Table';
 
-            app.DatabaseTableDropDown = uidropdown(app.UIFigure);
-            app.DatabaseTableDropDown.Position = [194 493 116 22];
-            app.DatabaseTableDropDown.Items = {'sim_lookup'};
-            app.DatabaseTableDropDown.Value = 'sim_lookup';
+            app.DatabaseTableDropDown = uidropdown(app.DataPanel);
+            app.DatabaseTableDropDown.Position = [108 52 200 22];
+            app.DatabaseTableDropDown.Editable = 'on';
+            app.DatabaseTableDropDown.Items = {'results_TWC'};
+            app.DatabaseTableDropDown.Value = 'results_TWC';
+            app.DatabaseTableDropDown.Tooltip = 'Name of the Excel sheet / SQL table results are stored in. Type a new name to start a fresh table.';
 
-            % Save Priority (y=331)
-            app.SavePriorityDropDownLabel = uilabel(app.UIFigure);
+            app.SavePriorityDropDownLabel = uilabel(app.DataPanel);
             app.SavePriorityDropDownLabel.HorizontalAlignment = 'right';
-            app.SavePriorityDropDownLabel.Position = [106 461 73 22];
+            app.SavePriorityDropDownLabel.Position = [25 24 73 22];
             app.SavePriorityDropDownLabel.Text = 'Save Priority';
 
-            app.SavePriorityDropDown = uidropdown(app.UIFigure);
-            app.SavePriorityDropDown.Position = [194 461 100 22];
+            app.SavePriorityDropDown = uidropdown(app.DataPanel);
+            app.SavePriorityDropDown.Position = [108 24 100 22];
             app.SavePriorityDropDown.Items = {'local', 'mysql'};
             app.SavePriorityDropDown.Value = 'local';
+            app.SavePriorityDropDown.Tooltip = 'Which existing results to check first when resuming a partially-simulated profile.';
 
-            % Enable MySQL (y=310)
-            app.EnableMySQLCheckBox = uicheckbox(app.UIFigure);
+            app.EnableMySQLCheckBox = uicheckbox(app.DataPanel);
             app.EnableMySQLCheckBox.Text = 'Enable MySQL';
-            app.EnableMySQLCheckBox.Position = [109 440 103 22];
+            app.EnableMySQLCheckBox.Position = [228 24 103 22];
             app.EnableMySQLCheckBox.Value = false;
 
-            % Save Excel (y=289)
-            app.SaveExcelCheckBox = uicheckbox(app.UIFigure);
+            app.SaveExcelCheckBox = uicheckbox(app.DataPanel);
             app.SaveExcelCheckBox.Text = 'Save Excel';
-            app.SaveExcelCheckBox.Position = [109 419 82 22];
+            app.SaveExcelCheckBox.Position = [330 24 82 22];
             app.SaveExcelCheckBox.Value = true;
 
-            % Trials per Iteration (y=260)
-            app.TrialsPerIterationEditFieldLabel = uilabel(app.UIFigure);
-            app.TrialsPerIterationEditFieldLabel.HorizontalAlignment = 'right';
-            app.TrialsPerIterationEditFieldLabel.Position = [67 390 112 22];
-            app.TrialsPerIterationEditFieldLabel.Text = 'Trials per Iteration';
+            %% Simulation panel
+            app.SimPanel = uipanel(app.UIFigure);
+            app.SimPanel.Title = 'Simulation';
+            app.SimPanel.Position = [20 320 420 210];
 
-            app.TrialsPerIterationEditField = uieditfield(app.UIFigure, 'numeric');
-            app.TrialsPerIterationEditField.Position = [197 390 100 22];
-            app.TrialsPerIterationEditField.Limits = [0 Inf];
-            app.TrialsPerIterationEditField.Value = 10;
+            app.ProfileSelectDropDownLabel = uilabel(app.SimPanel);
+            app.ProfileSelectDropDownLabel.HorizontalAlignment = 'right';
+            app.ProfileSelectDropDownLabel.Position = [10 162 76 22];
+            app.ProfileSelectDropDownLabel.Text = 'Profile Select';
 
-            % Parallelization (y=230)
-            app.ParallelizationCheckBox = uicheckbox(app.UIFigure);
-            app.ParallelizationCheckBox.Text = 'Parallelization';
-            app.ParallelizationCheckBox.Position = [89 360 97 22];
-            app.ParallelizationCheckBox.Value = false;
+            app.ProfileSelectDropDown = uidropdown(app.SimPanel);
+            app.ProfileSelectDropDown.Position = [96 162 250 22];
+            app.ProfileSelectDropDown.Items = {'1'};
+            app.ProfileSelectDropDown.ItemsData = {1};
+            app.ProfileSelectDropDown.Value = 1;
 
-            % Reload Profiles (y=195)
-            app.ReloadProfilesButton = uibutton(app.UIFigure, 'push');
+            app.ReloadProfilesButton = uibutton(app.SimPanel, 'push');
             app.ReloadProfilesButton.ButtonPushedFcn = createCallbackFcn(app, @ReloadProfilesButtonPushed, true);
-            app.ReloadProfilesButton.Position = [89 325 100 23];
+            app.ReloadProfilesButton.Position = [10 130 130 23];
             app.ReloadProfilesButton.Text = 'Reload Profiles';
 
-            % Iteratively Render (y=195)
-            app.IterativelyRenderCheckBox = uicheckbox(app.UIFigure);
+            app.IterativelyRenderCheckBox = uicheckbox(app.SimPanel);
             app.IterativelyRenderCheckBox.Text = 'Iteratively Render';
-            app.IterativelyRenderCheckBox.Position = [197 325 116 22];
+            app.IterativelyRenderCheckBox.Position = [160 130 130 22];
             app.IterativelyRenderCheckBox.Value = false;
+            app.IterativelyRenderCheckBox.Tooltip = 'Redraw the figure after every batch of frames instead of only at the end.';
 
-            % Delete Selected Configs (y=168)
-            app.DeleteSelectedConfigsCheckBox = uicheckbox(app.UIFigure);
-            app.DeleteSelectedConfigsCheckBox.Text = 'Delete Selected Configs';
-            app.DeleteSelectedConfigsCheckBox.Position = [89 298 150 22];
-            app.DeleteSelectedConfigsCheckBox.Value = false;
+            app.NumberofTrialsEditFieldLabel = uilabel(app.SimPanel);
+            app.NumberofTrialsEditFieldLabel.HorizontalAlignment = 'right';
+            app.NumberofTrialsEditFieldLabel.Position = [0 98 96 22];
+            app.NumberofTrialsEditFieldLabel.Text = 'Number of Frames';
 
-            % Ignore Errors (y=140)
-            app.IgnoreErrorsCheckBox = uicheckbox(app.UIFigure);
+            app.NumberofTrialsEditField = uieditfield(app.SimPanel, 'numeric');
+            app.NumberofTrialsEditField.Position = [106 98 90 22];
+            app.NumberofTrialsEditField.Limits = [0 Inf];
+            app.NumberofTrialsEditField.Value = 2000;
+            app.NumberofTrialsEditField.Tooltip = 'Total frames to simulate per point. 0 = skip simulating and only render a figure.';
+
+            app.TrialsPerIterationEditFieldLabel = uilabel(app.SimPanel);
+            app.TrialsPerIterationEditFieldLabel.HorizontalAlignment = 'right';
+            app.TrialsPerIterationEditFieldLabel.Position = [206 98 100 22];
+            app.TrialsPerIterationEditFieldLabel.Text = 'Frames/Iteration';
+
+            app.TrialsPerIterationEditField = uieditfield(app.SimPanel, 'numeric');
+            app.TrialsPerIterationEditField.Position = [312 98 90 22];
+            app.TrialsPerIterationEditField.Limits = [0 Inf];
+            app.TrialsPerIterationEditField.Value = 10;
+            app.TrialsPerIterationEditField.Tooltip = 'Frames simulated between each results save / figure refresh.';
+
+            app.ParallelizationCheckBox = uicheckbox(app.SimPanel);
+            app.ParallelizationCheckBox.Text = 'Parallelization';
+            app.ParallelizationCheckBox.Position = [10 66 100 22];
+            app.ParallelizationCheckBox.Value = false;
+
+            app.IgnoreErrorsCheckBox = uicheckbox(app.SimPanel);
             app.IgnoreErrorsCheckBox.Text = 'Ignore Errors';
-            app.IgnoreErrorsCheckBox.Position = [89 270 103 22];
+            app.IgnoreErrorsCheckBox.Position = [160 66 100 22];
             app.IgnoreErrorsCheckBox.Value = true;
+            app.IgnoreErrorsCheckBox.Tooltip = 'Automatically retry (after 5s) instead of stopping the GUI if a simulation errors out.';
 
-            % Figure Statistic (y=108)
-            app.FigureStatisticDropDownLabel = uilabel(app.UIFigure);
-            app.FigureStatisticDropDownLabel.HorizontalAlignment = 'right';
-            app.FigureStatisticDropDownLabel.Position = [84 238 95 22];
-            app.FigureStatisticDropDownLabel.Text = 'Figure Statistic';
+            app.DeleteSelectedConfigsCheckBox = uicheckbox(app.SimPanel);
+            app.DeleteSelectedConfigsCheckBox.Text = 'Delete Selected Configs';
+            app.DeleteSelectedConfigsCheckBox.Position = [10 34 170 22];
+            app.DeleteSelectedConfigsCheckBox.Value = false;
+            app.DeleteSelectedConfigsCheckBox.Tooltip = 'Erase and re-simulate any configs flagged in the profile''s delete_configs list.';
 
-            app.FigureStatisticDropDown = uidropdown(app.UIFigure);
-            app.FigureStatisticDropDown.Position = [194 238 116 22];
-            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 't_RXfull', 't_RXiter', 'recon_mse'};
-            app.FigureStatisticDropDown.Value = 'BER';
+            %% Convergence panel
+            app.ConvergencePanel = uipanel(app.UIFigure);
+            app.ConvergencePanel.Title = 'Adaptive Stopping (optional)';
+            app.ConvergencePanel.Position = [20 190 420 120];
 
-            % Enable Adaptive (y=115)
-            app.EnableAdaptiveCheckBox = uicheckbox(app.UIFigure);
-            app.EnableAdaptiveCheckBox.Text = 'Enable Adaptive';
-            app.EnableAdaptiveCheckBox.Position = [89 115 110 22];
+            app.EnableAdaptiveCheckBox = uicheckbox(app.ConvergencePanel);
+            app.EnableAdaptiveCheckBox.Text = 'Enable Adaptive Stopping';
+            app.EnableAdaptiveCheckBox.Position = [10 68 170 22];
             app.EnableAdaptiveCheckBox.Value = false;
+            app.EnableAdaptiveCheckBox.Tooltip = 'Stop simulating a point early once its metric estimate has converged, instead of always running the full frame count.';
 
-            % Relative Tolerance (y=92)
-            app.ToleranceEditFieldLabel = uilabel(app.UIFigure);
+            app.ToleranceEditFieldLabel = uilabel(app.ConvergencePanel);
             app.ToleranceEditFieldLabel.HorizontalAlignment = 'right';
-            app.ToleranceEditFieldLabel.Position = [80 92 105 22];
+            app.ToleranceEditFieldLabel.Position = [0 36 105 22];
             app.ToleranceEditFieldLabel.Text = 'Relative Tolerance';
 
-            app.ToleranceEditField = uieditfield(app.UIFigure, 'numeric');
-            app.ToleranceEditField.Position = [197 92 100 22];
+            app.ToleranceEditField = uieditfield(app.ConvergencePanel, 'numeric');
+            app.ToleranceEditField.Position = [115 36 80 22];
             app.ToleranceEditField.Limits = [0 1];
             app.ToleranceEditField.Value = 0.1;
 
-            % Min Frames (y=69)
-            app.MinFramesEditFieldLabel = uilabel(app.UIFigure);
+            app.MinFramesEditFieldLabel = uilabel(app.ConvergencePanel);
             app.MinFramesEditFieldLabel.HorizontalAlignment = 'right';
-            app.MinFramesEditFieldLabel.Position = [95 69 90 22];
+            app.MinFramesEditFieldLabel.Position = [205 36 80 22];
             app.MinFramesEditFieldLabel.Text = 'Min Frames';
 
-            app.MinFramesEditField = uieditfield(app.UIFigure, 'numeric');
-            app.MinFramesEditField.Position = [197 69 100 22];
+            app.MinFramesEditField = uieditfield(app.ConvergencePanel, 'numeric');
+            app.MinFramesEditField.Position = [295 36 100 22];
             app.MinFramesEditField.Limits = [0 Inf];
             app.MinFramesEditField.Value = 100;
 
-            % Confidence (y=46)
-            app.ConfidenceDropDownLabel = uilabel(app.UIFigure);
+            app.ConfidenceDropDownLabel = uilabel(app.ConvergencePanel);
             app.ConfidenceDropDownLabel.HorizontalAlignment = 'right';
-            app.ConfidenceDropDownLabel.Position = [88 46 95 22];
+            app.ConfidenceDropDownLabel.Position = [10 4 95 22];
             app.ConfidenceDropDownLabel.Text = 'Confidence';
 
-            app.ConfidenceDropDown = uidropdown(app.UIFigure);
-            app.ConfidenceDropDown.Position = [197 46 100 22];
+            app.ConfidenceDropDown = uidropdown(app.ConvergencePanel);
+            app.ConfidenceDropDown.Position = [115 4 80 22];
             app.ConfidenceDropDown.Items = {'0.90', '0.95', '0.99'};
-            app.ConfidenceDropDown.Value = '0.95';
+            app.ConfidenceDropDown.ItemsData = {0.90, 0.95, 0.99};
+            app.ConfidenceDropDown.Value = 0.95;
 
-            % Number of Trials (y=75)
-            app.NumberofTrialsEditFieldLabel = uilabel(app.UIFigure);
-            app.NumberofTrialsEditFieldLabel.HorizontalAlignment = 'right';
-            app.NumberofTrialsEditFieldLabel.Position = [88 205 91 22];
-            app.NumberofTrialsEditFieldLabel.Text = 'Number of Trials';
+            %% Figure Output panel
+            app.FigurePanel = uipanel(app.UIFigure);
+            app.FigurePanel.Title = 'Figure Output';
+            app.FigurePanel.Position = [20 130 420 50];
 
-            app.NumberofTrialsEditField = uieditfield(app.UIFigure, 'numeric');
-            app.NumberofTrialsEditField.Position = [197 205 100 22];
-            app.NumberofTrialsEditField.Limits = [0 Inf];
-            app.NumberofTrialsEditField.Value = 100;
+            app.FigureStatisticDropDownLabel = uilabel(app.FigurePanel);
+            app.FigureStatisticDropDownLabel.HorizontalAlignment = 'right';
+            app.FigureStatisticDropDownLabel.Position = [10 4 95 22];
+            app.FigureStatisticDropDownLabel.Text = 'Figure Statistic';
 
-            % Profile Select (y=46)
-            app.ProfileSelectDropDownLabel = uilabel(app.UIFigure);
-            app.ProfileSelectDropDownLabel.HorizontalAlignment = 'right';
-            app.ProfileSelectDropDownLabel.Position = [106 176 76 22];
-            app.ProfileSelectDropDownLabel.Text = 'Profile Select';
+            app.FigureStatisticDropDown = uidropdown(app.FigurePanel);
+            app.FigureStatisticDropDown.Position = [115 4 130 22];
+            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 't_RXfull', 't_RXiter', 'recon_mse'};
+            app.FigureStatisticDropDown.Value = 'BER';
+            app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view.';
 
-            app.ProfileSelectDropDown = uidropdown(app.UIFigure);
-            app.ProfileSelectDropDown.Position = [197 176 100 22];
-            app.ProfileSelectDropDown.Items = {'1'};
-            app.ProfileSelectDropDown.Value = '1';
+            %% Status line
+            app.StatusLabel = uilabel(app.UIFigure);
+            app.StatusLabel.Position = [20 90 420 22];
+            app.StatusLabel.HorizontalAlignment = 'center';
+            app.StatusLabel.Text = 'Ready.';
 
-            % Simulate button (y=15)
+            %% Action buttons
             app.SimulateButton = uibutton(app.UIFigure, 'push');
             app.SimulateButton.ButtonPushedFcn = createCallbackFcn(app, @SimulateButtonPushed, true);
-            app.SimulateButton.Position = [88 145 100 23];
+            app.SimulateButton.Position = [20 45 200 34];
             app.SimulateButton.Text = 'Simulate';
+            app.SimulateButton.FontWeight = 'bold';
 
-            % Generate Figure button (y=15)
             app.GenerateFigureButton = uibutton(app.UIFigure, 'push');
             app.GenerateFigureButton.ButtonPushedFcn = createCallbackFcn(app, @GenerateFigureButtonPushed, true);
-            app.GenerateFigureButton.Position = [194 145 102 23];
+            app.GenerateFigureButton.Position = [240 45 200 34];
             app.GenerateFigureButton.Text = 'Generate Figure';
 
             % Show figure after all components created
