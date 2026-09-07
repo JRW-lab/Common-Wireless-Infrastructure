@@ -448,7 +448,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.SaveExcelCheckBox = uicheckbox(app.StoragePanel);
             app.SaveExcelCheckBox.Text = 'Save Excel';
             app.SaveExcelCheckBox.Position = [8 40 100 22];
-            app.SaveExcelCheckBox.Value = true;
+            app.SaveExcelCheckBox.Value = false;
 
             resultsTableBox = uipanel(app.StoragePanel);
             resultsTableBox.BorderType = 'line';
