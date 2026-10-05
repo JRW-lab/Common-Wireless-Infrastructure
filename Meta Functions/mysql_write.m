@@ -65,8 +65,28 @@ while need_to_write
         for iField = 1:numel(metric_fields)
             % Weighted average
             field = metric_fields{iField};
-            metrics.(field) = ...
-                (old_metrics.(field) * N_old + metrics_add.(field) * new_frames) / N_total;
+            if ~isfield(old_metrics, field)
+                % NEW METRIC ON AN EXISTING ROW (guard added 2026-09-20).
+                % Previously this threw 'Unrecognized field name' and killed
+                % the worker, which meant that ADDING ANY NEW METRIC broke
+                % top-up collection on every row collected before it existed
+                % -- i.e. essentially the whole table. Hit for real when the
+                % t_*cpu* timing metrics were introduced.
+                %
+                % The new field is seeded from THIS batch alone, because
+                % there is no older value to blend with. That is a sound
+                % estimator for a per-frame mean (timing, BER, MSE are all
+                % stationary across frames, so a subset average is unbiased),
+                % but note its effective support is new_frames, not N_total,
+                % until enough further batches accumulate. Do NOT substitute
+                % 0 for the missing history -- that would silently bias the
+                % field toward zero in proportion to how much older data the
+                % row already had.
+                metrics.(field) = metrics_add.(field);
+            else
+                metrics.(field) = ...
+                    (old_metrics.(field) * N_old + metrics_add.(field) * new_frames) / N_total;
+            end
         end
 
         metricsJSON = jsonencode(metrics);

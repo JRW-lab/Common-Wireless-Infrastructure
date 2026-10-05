@@ -23,14 +23,24 @@ figures_folder = 'Figures';
 % get slower as everyone else's history accumulates, and this can run
 % repeatedly per simulation (Generate Figure, plus every iteration when
 % Iteratively Render is on).
+%
+% Empty entries are dropped: a profile with flat configs leaves the
+% non-anchor cells of those columns blank on purpose (see sim_head.m's
+% FLAT CONFIGS note), and an empty key handed to mysql_load would widen the
+% WHERE clause instead of narrowing it. For any other profile this is
+% exactly hash_cell(:).
+% NOTE: a separate variable -- hash_cell itself stays 2-D, because the
+% results loop below indexes it as hash_cell{primvar_sel, sel}.
+hash_list = hash_cell(:);
+hash_list = hash_list(~cellfun(@isempty, hash_list));
 switch save_data.priority
     case "mysql"
         if save_data.save_mysql
             try
-                T = mysql_load(conn, table_name, hash_cell(:));
+                T = mysql_load(conn, table_name, hash_list);
             catch
                 conn = mysql_login(conn.DataSource);
-                T = mysql_load(conn, table_name, hash_cell(:));
+                T = mysql_load(conn, table_name, hash_list);
             end
         elseif save_data.save_excel
             try
@@ -48,10 +58,10 @@ switch save_data.priority
             end
         elseif save_data.save_mysql
             try
-                T = mysql_load(conn, table_name, hash_cell(:));
+                T = mysql_load(conn, table_name, hash_list);
             catch
                 conn = mysql_login(conn.DataSource);
-                T = mysql_load(conn, table_name, hash_cell(:));
+                T = mysql_load(conn, table_name, hash_list);
             end
         end
 end
@@ -119,38 +129,68 @@ for primvar_sel = 1:num_primary
                 for row_idx = 1:num_rows
                     metrics_loaded = jsondecode(sim_result.metrics{row_idx});
 
-                    % Throughput special case
+                    % Throughput special case. PREFER THE STORED metrics.Thr:
+                    % every sim_fun that reports Thr computes it from its OWN
+                    % actual data-symbol count (syms_per_f - zero_syms, or the
+                    % ported-geometry Ndata), which differs by algorithm --
+                    % e.g. for CP-Free ODDM PT-MMSE at N=16/M=64/Q=4, perfect
+                    % CSI's native single-guard band (L=12) leaves 832
+                    % data symbols/frame, while DD-RELAX/SAGE/OMP/DT-MUSIC's
+                    % ported guard+pilot band (2L-1=23) leaves only 656.
+                    %
+                    % The recompute below predates several of those ported
+                    % estimators and uses ONE hardcoded guard formula (CWS's
+                    % native L1=Q+1, L2=Q+1+floor(2510e-9/Ts)) for every
+                    % non-MUSIC config regardless of which frame geometry it
+                    % actually ran with. Applied uniformly across configs that
+                    % share the same Q/M/N/T (as Figure 7's five curves do),
+                    % it silently gives every curve the SAME recomputed
+                    % ceiling at high SNR -- a rendering artifact that erases
+                    % a real, physical throughput gap between perfect CSI and
+                    % the pilot-based estimators. Bug found 2026-09-28.
+                    %
+                    % Kept only as a FALLBACK for rows written before Thr was
+                    % part of the schema (or any system that still doesn't
+                    % store it), so old data keeps rendering exactly as
+                    % before -- this is strictly an accuracy fix, not a
+                    % change to what gets plotted when a real Thr exists.
                     if data_type == "Thr"
+                        if isfield(metrics_loaded, 'Thr')
+                            trial_vals(row_idx) = metrics_loaded.Thr;
+                        else
                         params_loaded = jsondecode(sim_result.parameters{row_idx});
-                        switch params_loaded.system_name
-                            case "MUSIC"
-                                FER = metrics_loaded.FER;
-                                T_val = params_loaded.T;
-                                M = params_loaded.M;
-                                N = params_loaded.N;
-                                Q = params_loaded.num_pilots;
-                                Ts = T_val / M;
-                                L = 1 + floor(2510e-9 / Ts);
-                                trial_vals(row_idx) = 2 * (1 - FER) * (M * N) / (M * N + (2 * L + 1) * Q);
-                            otherwise
-                                FER = metrics_loaded.FER;
-                                params_loaded = jsondecode(sim_result.parameters{row_idx});
-                                T_val = params_loaded.T;
-                                M = params_loaded.M;
-                                try
-                                    N = params_loaded.N;
-                                catch
-                                    N = 1;
-                                end
-                                try
-                                    Q = params_loaded.Q;
-                                catch
-                                    Q = 1;
-                                end
-                                Ts = T_val / M;
-                                L1 = Q + 1;
-                                L2 = Q + 1 + floor(2510e-9 / Ts);
-                                trial_vals(row_idx) = 2 * (1 - FER) * (M * N) / ((M + L1 + L2) * N);
+                        % A "MUSIC" case used to sit here, switching on
+                        % params_loaded.system_name -- but no row in
+                        % sim_lookup has ever had system_name=="MUSIC"
+                        % (confirmed 2026-09-29: distinct system_name
+                        % values are OTFS-DD/ODDM/TODDM/OFDM/OTFS only;
+                        % MUSIC-style profiles carry a
+                        % channel_estimation_method field under
+                        % system_name="OTFS-DD" instead, per
+                        % build_point_params.m). It also used its OWN
+                        % hardcoded guard-width formula that didn't match
+                        % sim_fun_OTFS_MUSIC.m's real one (assumed
+                        % shape=="rect" unconditionally, and hardcoded
+                        % bits/symbol=2 regardless of M_ary) -- removed as
+                        % dead code rather than fixed, since it was
+                        % unreachable.
+                        FER = metrics_loaded.FER;
+                        T_val = params_loaded.T;
+                        M = params_loaded.M;
+                        try
+                            N = params_loaded.N;
+                        catch
+                            N = 1;
+                        end
+                        try
+                            Q = params_loaded.Q;
+                        catch
+                            Q = 1;
+                        end
+                        Ts = T_val / M;
+                        L1 = Q + 1;
+                        L2 = Q + 1 + floor(2510e-9 / Ts);
+                        trial_vals(row_idx) = 2 * (1 - FER) * (M * N) / ((M + L1 + L2) * N);
                         end
                     else
                         trial_vals(row_idx) = metrics_loaded.(data_type);
@@ -212,8 +252,20 @@ switch primary_var
     case "N"
         xlabel_name = "$N$ (num. time syms.)";
         x_type = "log";
+    case "gamma_p"
+        xlabel_name = "Pilot SNR $\gamma_p$ (dB)";
     otherwise
         xlabel_name = string(primary_var);
+end
+
+% PER-PROFILE X-SCALE OVERRIDE (2026-09-19). The switch above infers the
+% x-axis scale from primary_var alone, which cannot distinguish two profiles
+% that sweep the SAME variable over different ranges -- e.g. an NGS sweep of
+% 1:4 (linear reads better) versus [4 8 16 32] (log reads better). A profile
+% may set `p.x_log = true` to force a log x-axis. Absent or false leaves the
+% inferred behaviour exactly as before, so no existing profile changes.
+if isfield(figure_data,'x_log') && ~isempty(figure_data.x_log) && figure_data.x_log
+    x_type = "log";
 end
 
 %% Y-Axis label
@@ -224,9 +276,14 @@ switch data_type
         y_type = "linear";
         ylabel_name = "Throughput (bps/Hz)";
         ylim_vec = [0 2];
-    case "t_RXfull"
-        results_mat = results_mat * 1000;
-        ylabel_name = "$t_{RX,avg}$ (ms)";
+    % Timing metrics are handled generically below (t_<ALG>full /
+    % t_<ALG>iter) rather than case-by-case. The old code had a case for
+    % t_RXfull ONLY, so t_RXiter -- already offered in the GUI dropdown --
+    % fell through to `otherwise` and rendered with no ms scaling and a raw
+    % field name as its axis label. Handling the family fixes that and
+    % accommodates channel-estimation timings without further edits.
+    case "__timing_handled_below__"
+        % unreachable; the real work happens after this switch
     case "RX_iters"
         y_type = "linear";
         ylabel_name = "Number of RX Iterations";
@@ -246,19 +303,92 @@ switch data_type
         ylabel_name = string(data_type);
 end
 
+% ---- Generic runtime-metric handling: t_<ALG>full / t_<ALG>iter ----
+% ALG is a short algorithm tag, e.g. RX (reception/equalisation) or EST
+% (channel estimation). Adding a new timed algorithm needs no change here.
+%
+% UNITS: these are stored in SECONDS and displayed in MILLISECONDS.
+tm = regexp(char(data_type), '^t_([A-Za-z0-9]+?)(full|iter)$', 'tokens', 'once');
+if ~isempty(tm)
+    alg  = tm{1};
+    kind = tm{2};
+    results_mat = results_mat * 1000;
+    % A trailing 'cpu' in the tag marks a CPU-TIME metric, which must be
+    % labelled distinctly from the legacy wall-clock series: cputime SUMS
+    % ACROSS THREADS (measured ~3x wall on a multithreaded matmul), so the
+    % two are different quantities and must never be mistaken on a plot.
+    isCPU = endsWith(alg,'cpu','IgnoreCase',true);
+    if isCPU, alg = extractBefore(alg, strlength(alg)-2); end
+    if strcmp(kind,'full'), sub = ",avg}$"; else, sub = ",iter}$"; end
+    if isCPU
+        ylabel_name = "$t^{cpu}_{" + string(alg) + sub + " (ms, CPU)";
+    else
+        ylabel_name = "$t_{" + string(alg) + sub + " (ms, wall)";
+    end
+    y_type = "linear";   % runtimes are not log-scaled by default
+end
+
 %% Plot
+% FLAT CONFIGS (2026-09-21). A config listed in the profile's `flat_configs`
+% holds ONE measurement that does not depend on the primary variable (the
+% canonical case being a perfect-CSI reference on a pilot-SNR sweep, where
+% the frame carries no pilot at all). It is stored at a single anchor row
+% and is drawn here as a horizontal line spanning the whole x-range, rather
+% than as a lone marker with a column of NaNs around it.
+%
+% THREE THINGS THAT LOOK OPTIONAL AND ARE NOT:
+%
+% 1. The flat line is drawn INSIDE this same loop, in config order. The
+%    legend below is positional -- `legend(legend_vec, ...)` maps entries to
+%    axis children in creation order -- so drawing flat configs in a second
+%    pass, or with yline() (which parents differently), silently relabels
+%    every curve on the figure.
+% 2. Marker is forced off. A profile author writing "--bo" for a reference
+%    line would otherwise get stray circles pinned at the two axis edges,
+%    which read as data points that were never measured.
+% 3. The span uses primary_vals(1)/end, matching the xlim set below, so the
+%    line reaches both edges exactly rather than floating short of them.
+flat_configs = [];
+if isfield(figure_data,'flat_configs') && ~isempty(figure_data.flat_configs)
+    flat_configs = figure_data.flat_configs;
+end
+if isfield(figure_data,'flat_row') && ~isempty(figure_data.flat_row)
+    flat_row = figure_data.flat_row;
+else
+    flat_row = ones(1, num_configs);
+end
+
 figure(1);
 clf;
 hold on;
 for sel = 1:num_configs
-    plot(primary_vals, results_mat(:, sel), ...
-        line_styles{sel}, ...
-        Color=line_colors{sel}, ...
-        linewidth=line_val, ...
-        MarkerSize=mark_val);
+    if ismember(sel, flat_configs)
+        yflat = results_mat(flat_row(sel), sel);
+        if ~isnan(yflat)
+            plot([primary_vals(1) primary_vals(end)], [yflat yflat], ...
+                line_styles{sel}, ...
+                Color=line_colors{sel}, ...
+                linewidth=line_val, ...
+                Marker='none');
+        else
+            % Keep the child count and ordering stable even with no data
+            % yet, so the positional legend does not shift mid-collection.
+            plot(NaN, NaN, line_styles{sel}, Color=line_colors{sel}, ...
+                linewidth=line_val, Marker='none');
+        end
+    else
+        plot(primary_vals, results_mat(:, sel), ...
+            line_styles{sel}, ...
+            Color=line_colors{sel}, ...
+            linewidth=line_val, ...
+            MarkerSize=mark_val);
+    end
 end
 if num_trials > 1
     for sel = 1:num_configs
+        if ismember(sel, flat_configs)
+            continue;   % a single anchored measurement has no per-x spread
+        end
         errorbar(primary_vals, results_mat(:, sel), results_std(:, sel), ...
             'Color', line_colors{sel}, ...
             'LineStyle', 'none', ...

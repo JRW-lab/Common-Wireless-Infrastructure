@@ -16,10 +16,42 @@ end
 % Generate Figure click. Callers that hit a stale/dead connection already
 % detect it via isopen(...) and re-call mysql_login to recover, so this
 % is a drop-in speedup, not a behavior change.
+% ---------------------------------------------------------------------
+% THE CACHE MUST BE VALIDATED WITH A ROUND TRIP, NOT WITH isopen().
+%
+% isopen() inspects the CLIENT-side handle only. When MySQL closes an idle
+% connection server-side (wait_timeout, 8 hours by default) the client has
+% no idea: isopen() still returns true, this function hands back a dead
+% handle, and the caller's first fetch throws
+%
+%   "The last packet successfully received from the server was 42,851,106
+%    milliseconds ago ... is longer than the server configured value of
+%    'wait_timeout'"
+%
+% which is exactly the "open the GUI the next morning, hit Generate Figure,
+% get an error, click it again and it works" symptom. It worked on the
+% second click only because the failed attempt happened to leave the cache
+% in a state that forced a genuine reconnect -- not by design.
+%
+% The comment that used to sit here claimed "callers already detect a
+% stale connection via isopen(...) and re-call mysql_login to recover".
+% That was wrong, and it is why the bug survived: every layer trusted a
+% check that cannot see a server-side close.
+%
+% A SELECT 1 is a sub-millisecond round trip on the LAN, against the TCP
+% connect + auth + (without skip-name-resolve) reverse-DNS lookup this
+% cache exists to avoid. Validating is far cheaper than what it saves.
+% ---------------------------------------------------------------------
 persistent cached_conn cached_dbname
 if ~isempty(cached_conn) && isequal(cached_dbname, dbname) && isopen(cached_conn)
-    conn = cached_conn;
-    return;
+    if mysql_conn_is_live(cached_conn)
+        conn = cached_conn;
+        return;
+    end
+    % Dead server-side. Drop it and fall through to a real reconnect.
+    try, close(cached_conn); catch, end
+    cached_conn = [];
+    cached_dbname = [];
 end
 
 % Auto-provision the schema the first time this account connects to a

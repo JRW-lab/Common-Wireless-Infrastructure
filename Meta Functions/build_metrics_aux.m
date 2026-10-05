@@ -35,7 +35,7 @@ new_aux.total_frm_errors = sum(frame_data.frm_errors);
 new_aux.total_frames     = n_frames_eff;
 
 % Continuous Welford stats for every continuous per-frame field present.
-cont_fields = {'t_RXfull', 'recon_mse'};
+cont_fields = {'t_RXfull', 't_RXcpufull', 't_ESTcpufull', 'recon_mse'};
 for i = 1:numel(cont_fields)
     name = cont_fields{i};
     if isfield(frame_data, name)

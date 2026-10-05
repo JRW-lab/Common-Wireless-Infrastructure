@@ -32,6 +32,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
         ProfileTitleLabel                matlab.ui.control.Label
         ProfileSubtitleLabel             matlab.ui.control.Label
         ProfileDetailsButton             matlab.ui.control.Button
+        FrameCountsButton                matlab.ui.control.Button
 
         % Run card
         RunPanel                         matlab.ui.container.Panel
@@ -110,7 +111,14 @@ classdef WirelessSimulator < matlab.apps.AppBase
             items = cell(1, numel(idx));
             for k = 1:numel(idx)
                 i = idx(k);
-                items{k} = sprintf('%s\n%s', names{i}, profileSubtitle(app, app.AllProfiles{i}));
+                % PREFIX IS `i`, THE INDEX INTO all_profiles -- NOT `k`, the
+                % row's position in the filtered list. With a filter active
+                % the two differ, and a number that renumbers itself as you
+                % type in the search box would be worse than no number at
+                % all: the /render-figure skill takes this index as its only
+                % argument, so it has to mean the same thing in every view.
+                items{k} = sprintf('%d. %s\n%s', i, names{i}, ...
+                    profileSubtitle(app, app.AllProfiles{i}));
             end
             prevValue = app.ProfileListBox.Value;
             app.ProfileListBox.Items = items;
@@ -190,6 +198,253 @@ classdef WirelessSimulator < matlab.apps.AppBase
             detailArea.Value = cellstr(splitlines(string(bodyText)));
         end
 
+        function FrameCountsButtonPushed(app, ~)
+            % Show how many frames are actually accumulated for every test
+            % point of the selected profile: one ROW per primary-variable
+            % value, one COLUMN per config. Read-only -- queries the results
+            % table and writes nothing.
+            idx = app.ProfileListBox.Value;
+            if isempty(idx) || idx < 1 || idx > numel(app.AllProfiles)
+                return;
+            end
+            name = app.AllProfileNames{idx};
+            profile = app.AllProfiles{idx};
+
+            % The GUI is launched via launch_gui.m, which only adds the
+            % infrastructure folder to the path -- jsonencode_sorted and
+            % mysql_load live in its "Meta Functions" subfolder, and the
+            % project may have its own. Add both defensively so this button
+            % works without having run a simulation first (which is what
+            % normally calls sim_head and sets up the full path).
+            infraDir = fileparts(mfilename('fullpath'));
+            projRoot = fileparts(infraDir);
+            addpath(fullfile(infraDir, 'Meta Functions'));
+            if isfolder(fullfile(projRoot, 'Meta Functions'))
+                addpath(fullfile(projRoot, 'Meta Functions'));
+            end
+
+            primary_var  = profile.primary_var;
+            primary_vals = profile.primary_vals;
+            configs      = profile.configs;
+            nP = numel(primary_vals);
+            nC = numel(configs);
+
+            % FLAT CONFIGS (2026-09-21): a config measured once, at
+            % profile.flat_anchor, and drawn as a horizontal line (see
+            % sim_head.m's FLAT CONFIGS note). Only its anchor row is a real
+            % test point; the rest of its column is shown as NaN ("-")
+            % rather than 0, because 0 here means "a point that needs
+            % collecting and has none", which is exactly what these are not.
+            flat_cols = [];
+            flat_anchor_row = [];
+            if isfield(profile,'flat_configs') && ~isempty(profile.flat_configs)
+                flat_cols = unique(profile.flat_configs(:)).';
+                if isfield(profile,'flat_anchor') && ~isempty(profile.flat_anchor)
+                    flat_anchor_row = find(primary_vals == profile.flat_anchor, 1);
+                end
+                if isempty(flat_anchor_row)
+                    flat_anchor_row = 1;
+                end
+            end
+            is_point = true(nP, nC);
+            if ~isempty(flat_cols)
+                is_point(:, flat_cols) = false;
+                is_point(flat_anchor_row, flat_cols) = true;
+            end
+
+            % Column headers: prefer the profile's own legend text, since
+            % that is what the reader sees on the rendered figure. Fall back
+            % to the config's own overridden fields when a profile has no
+            % legend (or a mismatched count -- do not assume they line up).
+            colNames = cell(1,nC);
+            haveLegend = isfield(profile,'legend_vec') && numel(profile.legend_vec) == nC;
+            for c = 1:nC
+                if haveLegend
+                    colNames{c} = char(string(profile.legend_vec{c}));
+                else
+                    fn = fieldnames(configs{c});
+                    parts = strings(1,numel(fn));
+                    for k = 1:numel(fn)
+                        v = configs{c}.(fn{k});
+                        if isnumeric(v) && isscalar(v)
+                            parts(k) = fn{k} + "=" + string(v);
+                        else
+                            parts(k) = string(fn{k});
+                        end
+                    end
+                    colNames{c} = char(strjoin(parts, ", "));
+                end
+            end
+
+            rowNames = cell(nP,1);
+            for r = 1:nP
+                rowNames{r} = char(string(primary_var) + "=" + string(primary_vals(r)));
+            end
+
+            % --- query the results table ---
+            counts = nan(nP,nC);
+            errMsg = '';
+            try
+                conn = mysql_login("comm_database");
+                cleanupConn = onCleanup(@() close(conn));
+                hashes = cell(nP,nC);
+                for c = 1:nC
+                    for r = 1:nP
+                        parameters = profile.default_parameters;
+                        parameters.(primary_var) = primary_vals(r);
+                        ov = configs{c};
+                        fn = fieldnames(ov);
+                        for k = 1:numel(fn)
+                            parameters.(fn{k}) = ov.(fn{k});
+                        end
+                        % Mirror sim_head.m's own ODDM scrubbing, or the
+                        % hashes will not match what was actually written.
+                        if isfield(parameters,'system_name') && parameters.system_name == "ODDM" ...
+                                && isfield(parameters,'U')
+                            parameters = rmfield(parameters,'U');
+                        end
+                        [~, h] = jsonencode_sorted(parameters);
+                        hashes{r,c} = h;
+                    end
+                end
+                T = mysql_load(conn, app.ResultsTableName, hashes(:));
+                if ~isempty(T)
+                    allH = string(T.param_hash);
+                    for c = 1:nC
+                        for r = 1:nP
+                            if ~is_point(r,c)
+                                counts(r,c) = NaN;   % not a test point
+                                continue;
+                            end
+                            k = find(allH == hashes{r,c}, 1);
+                            if isempty(k)
+                                counts(r,c) = 0;
+                            else
+                                counts(r,c) = T.frames_simulated(k);
+                            end
+                        end
+                    end
+                else
+                    counts(:) = 0;
+                    counts(~is_point) = NaN;
+                end
+            catch ME
+                errMsg = ME.message;
+            end
+
+            % --- window ---
+            f = uifigure('Name', "Frame Counts - " + name);
+            f.Position = [220 140 min(1100, 260 + 130*nC) 520];
+
+            hdr = uilabel(f);
+            hdr.Position = [16 480 f.Position(3)-32 24];
+            hdr.FontWeight = 'bold';
+            hdr.FontSize = 14;
+            hdr.Text = char(name);
+
+            sub = uilabel(f);
+            sub.Position = [16 458 f.Position(3)-32 20];
+            if isempty(errMsg)
+                tot = sum(counts(~isnan(counts)));
+                nzero = sum(counts(is_point) == 0);
+                mn = min(counts(is_point));
+                if isempty(mn), mn = 0; end
+                % A flat config has an anchor ONLY in the flat_anchor form.
+                % In the flat_defaults form the primary variable is absent
+                % from its parameter struct altogether, so there is no
+                % anchor value to name -- reading profile.flat_anchor there
+                % throws "Unrecognized field name". The row-index logic
+                % above already handles both forms; this label has to as
+                % well.
+                flatTxt = '';
+                if ~isempty(flat_cols)
+                    if isfield(profile,'flat_anchor') && ~isempty(profile.flat_anchor)
+                        flatTxt = sprintf('   |   %d flat config(s), measured once at %s=%g', ...
+                            numel(flat_cols), char(string(primary_var)), profile.flat_anchor);
+                    else
+                        flatTxt = sprintf(['   |   %d flat config(s), measured once ' ...
+                            '(independent of %s)'], ...
+                            numel(flat_cols), char(string(primary_var)));
+                    end
+                end
+                sub.Text = sprintf(['table "%s"   |   %d points   |   total %s frames   |   ' ...
+                    'min %s   |   %d point(s) with no data%s'], ...
+                    char(app.ResultsTableName), nnz(is_point), ...
+                    char(string(tot)), char(string(mn)), nzero, flatTxt);
+            else
+                sub.FontColor = [0.72 0.11 0.11];
+                sub.Text = ['Could not read the results table: ' errMsg];
+            end
+
+            t = uitable(f);
+            t.Position = [16 16 f.Position(3)-32 434];
+            t.Data = counts;
+            t.RowName = rowNames;
+            t.ColumnName = colNames;
+            t.ColumnWidth = repmat({'fit'}, 1, nC);
+
+            % Highlight points with nothing collected yet, so gaps are
+            % obvious at a glance rather than needing to be read for.
+            % Cells of a flat config that are not its anchor are greyed
+            % instead -- they are NOT gaps to be filled.
+            try
+                s = uistyle('BackgroundColor', [1 0.92 0.92]);
+                [rz, cz] = find(counts == 0 & is_point);
+                if ~isempty(rz)
+                    addStyle(t, s, 'cell', [rz cz]);
+                end
+                sflat = uistyle('BackgroundColor', [0.94 0.94 0.94]);
+                [rf, cf] = find(~is_point);
+                if ~isempty(rf)
+                    addStyle(t, sflat, 'cell', [rf cf]);
+                end
+            catch
+                % uistyle/addStyle unavailable on older releases - the table
+                % is still perfectly usable without the highlighting.
+            end
+        end
+
+        %% Error reporting
+
+        function showErrorDialog(app, ME)
+            % Full, copyable error report (message + identifier + full
+            % stack trace with file/line numbers) - reuses the same
+            % uifigure+uitextarea pattern as ProfileDetailsButtonPushed's
+            % detail viewer, since uitextarea content (unlike a uilabel's)
+            % can actually be selected and copied. Also printed to the
+            % Command Window so it's captured even if this dialog is
+            % closed or missed.
+            report = getReport(ME, 'extended', 'hyperlinks', 'off');
+            disp("===== Simulation error =====");
+            disp(report);
+            disp("=============================");
+
+            detailFig = uifigure('Name', 'Simulation Error');
+            detailFig.Position = [200 100 760 560];
+
+            titleText = "Error";
+            if ~isempty(ME.identifier)
+                titleText = "Error: " + string(ME.identifier);
+            end
+            titleLabel = uilabel(detailFig);
+            titleLabel.Position = [16 520 728 24];
+            titleLabel.FontWeight = 'bold';
+            titleLabel.FontSize = 14;
+            titleLabel.FontColor = [0.72 0.11 0.11];
+            titleLabel.Text = titleText;
+
+            hintLabel = uilabel(detailFig);
+            hintLabel.Position = [16 496 728 20];
+            hintLabel.FontColor = [0.35 0.35 0.35];
+            hintLabel.Text = 'Full report below (click, Ctrl+A, Ctrl+C to copy) - also printed to the Command Window.';
+
+            detailArea = uitextarea(detailFig);
+            detailArea.Position = [16 16 728 472];
+            detailArea.Editable = 'off';
+            detailArea.FontName = 'Consolas';
+            detailArea.Value = cellstr(splitlines(string(report)));
+        end
+
         %% Status / progress
 
         function setStatus(app, msg, isError)
@@ -217,7 +472,16 @@ classdef WirelessSimulator < matlab.apps.AppBase
                 config_length = d.num_primary * d.num_configs;
                 sim_length = d.num_iters * config_length;
                 setProgressFraction(app, sim_count / sim_length);
-                app.StatusLine1Label.Text = sprintf('Config %d/%d - %s (%s) - frame %d/%d', ...
+
+                % Full parameter listing + text progress bar, in the style
+                % of PVP-IPFM's own updateProgressBar.m - printed to the
+                % Command Window (copyable, scrollable, not truncated by a
+                % single GUI label) rather than reconstructed here; see
+                % print_progress_params.m for the flexible name/unit
+                % lookup ("EbN0" -> "Eb/N0 = 16 dB", etc.).
+                print_progress_params(d);
+
+                app.StatusLine1Label.Text = sprintf('Config %d/%d - %s (%s) - frame %d/%d - full parameter list in Command Window', ...
                     config_count, config_length, d.system_name, d.receiver_name, ...
                     d.current_frames, d.num_frames);
                 app.StatusLine1Label.FontColor = [0.15 0.15 0.15];
@@ -269,19 +533,30 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.StatusLine2Label.Text = '';
             setStatus(app, "Simulating...", false);
             finish_flag = false;
-            while ~finish_flag
-                if app.IgnoreErrorsCheckBox.Value
-                    try
-                        finish_flag = sim_head(settings);
-                    catch ME
-                        setStatus(app, "Error: " + ME.message + " (retrying in 5s...)", true);
-                        pause(5);
-                    end
-                else
+            stopped_on_error = false;
+            while ~finish_flag && ~stopped_on_error
+                try
                     finish_flag = sim_head(settings);
+                catch ME
+                    if app.IgnoreErrorsCheckBox.Value
+                        % Opt-in resilience for long unattended runs: log
+                        % the full report (Command Window) so it isn't
+                        % lost, but don't block the retry loop with a
+                        % modal dialog every 5 seconds.
+                        disp("===== Simulation error (ignored, retrying in 5s) =====");
+                        disp(getReport(ME, 'extended', 'hyperlinks', 'off'));
+                        setStatus(app, "Error: " + ME.message + " (retrying in 5s - see Command Window)", true);
+                        pause(5);
+                    else
+                        setStatus(app, "Error - stopped. See error dialog for full details.", true);
+                        showErrorDialog(app, ME);
+                        stopped_on_error = true;
+                    end
                 end
             end
-            setStatus(app, "Done.", false);
+            if ~stopped_on_error
+                setStatus(app, "Done.", false);
+            end
         end
 
         function GenerateFigureButtonPushed(app, ~)
@@ -294,12 +569,29 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.num_frames         = 0;
             settings.iteratively_render = false;
             settings.delete_sel         = false;
+            % PROGRESS BAR (added 2026-09-23). Figure generation emits no
+            % progress callbacks -- sim_head is called here with num_frames=0
+            % and no progress_fcn -- so the bar cannot fill incrementally the
+            % way it does for Run. It is used as a completion indicator
+            % instead: cleared on entry so a stale fill from an earlier Run
+            % cannot be mistaken for this action's state, then filled to 100%
+            % (the fill panel is already green against a grey track) only once
+            % sim_head has returned successfully.
+            %
+            % Cleared again on the error path on purpose. Leaving a full green
+            % bar behind a failed render would assert success while the status
+            % line says otherwise, and the bar is the more glanceable of the
+            % two.
+            setProgressFraction(app, 0);
             setStatus(app, "Generating figure...", false);
             try
                 sim_head(settings);
+                setProgressFraction(app, 1);   % full green = figure complete
                 setStatus(app, "Figure generated.", false);
             catch ME
-                setStatus(app, "Error: " + ME.message, true);
+                setProgressFraction(app, 0);
+                setStatus(app, "Error - see error dialog for full details.", true);
+                showErrorDialog(app, ME);
             end
         end
     end
@@ -326,7 +618,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
             % Create figure
             app.UIFigure = uifigure('Visible', 'off');
-            app.UIFigure.Position = [80 60 940 560];
+            app.UIFigure.Position = [80 60 1054 560];   % widened 940->1054 on 2026-09-18 to fit the Frame Counts button beside Details without shrinking ProfileTitleLabel (which would clip long profile names)
             app.UIFigure.Name = 'Wireless Simulator';
 
             %% Sidebar
@@ -369,9 +661,16 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.ProfileDetailsButton.Text = 'Details';
             app.ProfileDetailsButton.Tooltip = 'Open the full profile definition (parameters, configs, plot settings) in a new window.';
 
+            % Frame Counts (2026-09-18): sits immediately right of Details.
+            app.FrameCountsButton = uibutton(app.UIFigure, 'push');
+            app.FrameCountsButton.ButtonPushedFcn = createCallbackFcn(app, @FrameCountsButtonPushed, true);
+            app.FrameCountsButton.Position = [940 485 94 22];
+            app.FrameCountsButton.Text = 'Frames';
+            app.FrameCountsButton.Tooltip = 'Show how many frames are accumulated for every test point of this profile (rows = primary variable sweep, columns = configs).';
+
             app.ProfileSubtitleLabel = uilabel(app.UIFigure);
             app.ProfileSubtitleLabel.FontColor = [0.45 0.45 0.45];
-            app.ProfileSubtitleLabel.Position = [266 460 664 20];
+            app.ProfileSubtitleLabel.Position = [266 460 778 20];
             app.ProfileSubtitleLabel.Text = '';
 
             %% Run card
@@ -409,8 +708,8 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.IgnoreErrorsCheckBox = uicheckbox(app.RunPanel);
             app.IgnoreErrorsCheckBox.Text = 'Ignore Errors';
             app.IgnoreErrorsCheckBox.Position = [160 68 140 22];
-            app.IgnoreErrorsCheckBox.Value = true;
-            app.IgnoreErrorsCheckBox.Tooltip = 'Automatically retry (after 5s) instead of stopping the GUI if a simulation errors out.';
+            app.IgnoreErrorsCheckBox.Value = false;
+            app.IgnoreErrorsCheckBox.Tooltip = 'If checked, automatically retry (after 5s) instead of stopping when a simulation errors out - full error details still go to the Command Window, but no dialog pops up each retry. Off by default so errors stop the run and show a full, copyable error dialog immediately (recommended while debugging).';
 
             app.IterativelyRenderCheckBox = uicheckbox(app.RunPanel);
             app.IterativelyRenderCheckBox.Text = 'Iteratively Render';
@@ -521,7 +820,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
             app.FigureStatisticDropDown = uidropdown(app.OutputPanel);
             app.FigureStatisticDropDown.Position = [102 96 140 22];
-            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 't_RXfull', 't_RXiter', 'recon_mse'};
+            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 't_RXfull', 't_RXiter', 't_RXcpufull', 't_RXcpuiter', 't_ESTcpufull', 't_ESTcpuiter', 'recon_mse'};
             app.FigureStatisticDropDown.Value = 'BER';
             app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view.';
 
@@ -537,11 +836,11 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.ProgressFillPanel.Position = [0 0 1 20];
 
             app.StatusLine1Label = uilabel(app.UIFigure);
-            app.StatusLine1Label.Position = [426 68 504 22];
+            app.StatusLine1Label.Position = [426 68 618 22];
             app.StatusLine1Label.Text = 'Ready.';
 
             app.StatusLine2Label = uilabel(app.UIFigure);
-            app.StatusLine2Label.Position = [266 42 664 18];
+            app.StatusLine2Label.Position = [266 42 778 18];
             app.StatusLine2Label.FontColor = [0.45 0.45 0.45];
             app.StatusLine2Label.FontSize = 11;
             app.StatusLine2Label.Text = '';
