@@ -284,6 +284,29 @@ switch data_type
     % accommodates channel-estimation timings without further edits.
     case "__timing_handled_below__"
         % unreachable; the real work happens after this switch
+    % CODED throughput (added 2026-10-05). Distinct from "Thr", which is
+    % the UNCODED metric: Thr = log2(M)*syms_data*(1-FER) / (T*B) with FER
+    % the uncoded frame error rate, so it collapses to exactly 0 for any
+    % scheme whose raw BER exceeds roughly 1e-4 at a 1-2k-bit frame and
+    % cannot express a coded result at all. These two count INFORMATION
+    % bits delivered instead:
+    %   Thr_coded     frame-level goodput -- every codeword in the frame
+    %                 must decode correctly.
+    %   Thr_coded_cw  per-codeword goodput -- each correct codeword
+    %                 counts. Less pessimistic, and the more useful of the
+    %                 two near FER = 1, where the frame-level metric
+    %                 saturates and stops discriminating between schemes.
+    % Both exceed 1 bps/Hz at code rates above 1/2, hence the same [0 2]
+    % range as Thr rather than a tighter one.
+    case {"Thr_coded", "Thr_coded_cw"}
+        loc = "southeast";
+        y_type = "linear";
+        if data_type == "Thr_coded"
+            ylabel_name = "Coded Throughput (bps/Hz)";
+        else
+            ylabel_name = "Coded Throughput, per codeword (bps/Hz)";
+        end
+        ylim_vec = [0 2];
     case "RX_iters"
         y_type = "linear";
         ylabel_name = "Number of RX Iterations";
