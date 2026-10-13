@@ -523,9 +523,79 @@ classdef WirelessSimulator < matlab.apps.AppBase
                 handleConvergence(app, iter, num_iters, current_frames, n_suff, n_total);
         end
 
+        function tf = isCostStatistic(app)
+            % A cost statistic is measured by the project's cost_head.m,
+            % never read from the results table.
+            v = string(app.FigureStatisticDropDown.Value);
+            tf = startsWith(v, "Runtime:") || startsWith(v, "FLOPs:");
+        end
+
+        function runCostPipeline(app, measure)
+            % measure=true times the selected profile (Simulate);
+            % measure=false renders its newest saved measurement
+            % (Generate Figure).
+            if exist('cost_head', 'file') ~= 2
+                uialert(app.UIFigure, ['This project has no cost_head.m, so ' ...
+                    'runtime cannot be measured here. Choose a performance ' ...
+                    'statistic instead.'], 'Runtime not available', 'Icon', 'warning');
+                return;
+            end
+            settings = buildSettings(app);
+            if ~measure
+                settings.num_frames  = 0;
+                settings.use_parallel = false;
+            end
+            settings.status_fcn = @(msg, frac) costStatus(app, msg, frac);
+            setProgressFraction(app, 0);
+            app.StatusLine2Label.Text = '';
+            if measure
+                setStatus(app, "Measuring runtime back to back...", false);
+            else
+                setStatus(app, "Rendering saved runtime measurement...", false);
+            end
+            try
+                cost_head(settings);
+                setProgressFraction(app, 1);
+                setStatus(app, "Runtime figure generated.", false);
+            catch ME
+                setProgressFraction(app, 0);
+                setStatus(app, "Error - see error dialog for full details.", true);
+                showErrorDialog(app, ME);
+            end
+        end
+
+        function costStatus(app, msg, frac)
+            try
+                app.StatusLine2Label.Text = char(msg);
+                setProgressFraction(app, frac);
+                drawnow limitrate;
+            catch
+            end
+        end
+
         function SimulateButtonPushed(app, ~)
             if isempty(app.ProfileListBox.Value)
                 setStatus(app, "Select a profile first.", true);
+                return;
+            end
+            if isCostStatistic(app)
+                % RUNTIME MUST NOT BE MEASURED IN PARALLEL. Workers share
+                % the cores being timed, so every number would include
+                % the other workers' load. Stop before anything runs.
+                if app.ParallelizationCheckBox.Value
+                    uialert(app.UIFigure, ['Runtime is measured back to back in ' ...
+                        'a single process. Parallel workers would compete for ' ...
+                        'the cores being timed and contaminate every number. ' ...
+                        'Untick Parallelization and press Simulate again.'], ...
+                        'Parallelization is on', 'Icon', 'error');
+                    setStatus(app, "Stopped: untick Parallelization to measure runtime.", true);
+                    return;
+                end
+                if app.NumberofTrialsEditField.Value <= 0
+                    runCostPipeline(app, false);
+                else
+                    runCostPipeline(app, true);
+                end
                 return;
             end
             settings = buildSettings(app);
@@ -562,6 +632,10 @@ classdef WirelessSimulator < matlab.apps.AppBase
         function GenerateFigureButtonPushed(app, ~)
             if isempty(app.ProfileListBox.Value)
                 setStatus(app, "Select a profile first.", true);
+                return;
+            end
+            if isCostStatistic(app)
+                runCostPipeline(app, false);
                 return;
             end
             settings = buildSettings(app);
@@ -820,9 +894,19 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
             app.FigureStatisticDropDown = uidropdown(app.OutputPanel);
             app.FigureStatisticDropDown.Position = [102 96 140 22];
-            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 't_RXfull', 't_RXiter', 't_RXcpufull', 't_RXcpuiter', 't_ESTcpufull', 't_ESTcpuiter', 'recon_mse'};
+            % TIMING (2026-10-13). t_RXfull, t_RXiter, t_RXcpufull,
+            % t_RXcpuiter, t_ESTcpufull and t_ESTcpuiter are no longer
+            % offered. They are read from the results table, where frames
+            % from different machines are averaged together, parfor workers
+            % contend for cores, and cputime counts every BLAS thread, so
+            % they cannot rank two methods by cost. The "Runtime: ..."
+            % entries instead run the project's cost_head.m, which times
+            % the stages back to back in this one process (see
+            % isCostStatistic and runCostPipeline below). "FLOPs: ..."
+            % entries will join them when that pipeline exists.
+            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 'recon_mse', 'Runtime: estimator', 'Runtime: detector'};
             app.FigureStatisticDropDown.Value = 'BER';
-            app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view.';
+            app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view. Runtime entries are measured back to back by cost_head.m (Simulate times Number of Trials frames per point, Parallelization must be off; Generate Figure shows the newest saved measurement).';
 
             %% Status strip
             app.ProgressTrackPanel = uipanel(app.UIFigure);
