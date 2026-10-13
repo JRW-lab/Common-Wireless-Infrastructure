@@ -54,15 +54,17 @@ classdef WirelessSimulator < matlab.apps.AppBase
         ResultsTableCaptionLabel         matlab.ui.control.Label
         ResultsTableValueLabel           matlab.ui.control.Label
 
-        % Adaptive stopping card
+        % Frames per point card (was Adaptive stopping)
         ConvergencePanel                 matlab.ui.container.Panel
-        EnableAdaptiveCheckBox           matlab.ui.control.CheckBox
-        ToleranceEditField               matlab.ui.control.NumericEditField
-        ToleranceEditFieldLabel          matlab.ui.control.Label
-        MinFramesEditField               matlab.ui.control.NumericEditField
-        MinFramesEditFieldLabel          matlab.ui.control.Label
-        ConfidenceDropDown               matlab.ui.control.DropDown
-        ConfidenceDropDownLabel          matlab.ui.control.Label
+        FrameSplitCheckBox               matlab.ui.control.CheckBox
+        FrameSplitMetricDropDown         matlab.ui.control.DropDown
+        FrameSplitThresholdEditField     matlab.ui.control.NumericEditField
+        FrameSplitThresholdLabel         matlab.ui.control.Label
+        FramesHighBerEditField           matlab.ui.control.NumericEditField
+        FramesHighBerLabel               matlab.ui.control.Label
+        FramesLowBerEditField            matlab.ui.control.NumericEditField
+        FramesLowBerLabel                matlab.ui.control.Label
+        FramesUnitLabel                  matlab.ui.control.Label
 
         % Output card
         OutputPanel                      matlab.ui.container.Panel
@@ -493,7 +495,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
         function handleConvergence(app, iter, num_iters, current_frames, n_sufficient, n_total)
             try
-                app.StatusLine2Label.Text = sprintf('Iteration %d/%d (%d frames) - %d/%d points converged', ...
+                app.StatusLine2Label.Text = sprintf('Iteration %d/%d (%d frames) - %d/%d points at their frame target', ...
                     iter, num_iters, current_frames, n_sufficient, n_total);
                 drawnow limitrate;
             catch
@@ -510,17 +512,46 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.save_mysql          = app.EnableMySQLCheckBox.Value;
             settings.save_excel          = app.SaveExcelCheckBox.Value;
             settings.profile_sel         = app.ProfileListBox.Value;
-            settings.num_frames          = app.NumberofTrialsEditField.Value;
+            % FRAME TARGETS (2026-10-13, replacing adaptive stopping).
+            % num_frames stays the "all points" target; with the split on
+            % it is the largest target so a sim_head without split
+            % support still collects enough, and sim_head applies the
+            % per-point rule from the frame_split fields.
+            settings.frame_split           = app.FrameSplitCheckBox.Value;
+            settings.frame_split_metric    = app.FrameSplitMetricDropDown.Value;
+            settings.frame_split_threshold = app.FrameSplitThresholdEditField.Value;
+            settings.frames_high_ber       = app.FramesHighBerEditField.Value;
+            settings.frames_low_ber        = app.FramesLowBerEditField.Value;
+            if settings.frame_split
+                settings.num_frames = max(settings.frames_high_ber, settings.frames_low_ber);
+            else
+                settings.num_frames = app.NumberofTrialsEditField.Value;
+            end
             settings.iteratively_render  = app.IterativelyRenderCheckBox.Value;
             settings.delete_sel          = app.DeleteSelectedConfigsCheckBox.Value;
             settings.figure_statistic    = app.FigureStatisticDropDown.Value;
-            settings.enable_adaptive     = app.EnableAdaptiveCheckBox.Value;
-            settings.relative_tolerance  = app.ToleranceEditField.Value;
-            settings.min_frames          = app.MinFramesEditField.Value;
-            settings.confidence          = app.ConfidenceDropDown.Value;
             settings.progress_fcn        = @(d) handleProgress(app, d);
             settings.convergence_fcn     = @(iter, num_iters, current_frames, n_suff, n_total) ...
                 handleConvergence(app, iter, num_iters, current_frames, n_suff, n_total);
+        end
+
+        function updateFrameControls(app)
+            % One target for every point, or two chosen by error rate.
+            split = app.FrameSplitCheckBox.Value;
+            onoff = {'off', 'on'};
+            app.NumberofTrialsEditField.Enable      = onoff{~split + 1};
+            app.NumberofTrialsEditFieldLabel.Enable = onoff{~split + 1};
+            ctrls = {app.FrameSplitMetricDropDown, app.FrameSplitThresholdEditField, ...
+                app.FrameSplitThresholdLabel, app.FramesHighBerEditField, ...
+                app.FramesHighBerLabel, app.FramesLowBerEditField, ...
+                app.FramesLowBerLabel, app.FramesUnitLabel};
+            for k = 1:numel(ctrls)
+                ctrls{k}.Enable = onoff{split + 1};
+            end
+        end
+
+        function FrameSplitCheckBoxValueChanged(app, ~)
+            updateFrameControls(app);
         end
 
         function tf = isCostStatistic(app)
@@ -540,10 +571,19 @@ classdef WirelessSimulator < matlab.apps.AppBase
                     'statistic instead.'], 'Runtime not available', 'Icon', 'warning');
                 return;
             end
+            if measure && app.FrameSplitCheckBox.Value
+                uialert(app.UIFigure, ['Runtime is timed over the "All points" ' ...
+                    'frame count. Untick "Set frames by error rate", enter the ' ...
+                    'frames per point to time, and press Simulate again.'], ...
+                    'Frames are split by error rate', 'Icon', 'warning');
+                return;
+            end
             settings = buildSettings(app);
             if ~measure
                 settings.num_frames  = 0;
                 settings.use_parallel = false;
+            else
+                settings.num_frames  = app.NumberofTrialsEditField.Value;
             end
             settings.status_fcn = @(msg, frac) costStatus(app, msg, frac);
             setProgressFraction(app, 0);
@@ -752,27 +792,21 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.RunPanel.Title = 'RUN';
             app.RunPanel.Position = [266 296 320 150];
 
-            app.NumberofTrialsEditFieldLabel = uilabel(app.RunPanel);
-            app.NumberofTrialsEditFieldLabel.HorizontalAlignment = 'right';
-            app.NumberofTrialsEditFieldLabel.Position = [8 96 65 20];
-            app.NumberofTrialsEditFieldLabel.Text = 'Frames';
-
-            app.NumberofTrialsEditField = uieditfield(app.RunPanel, 'numeric');
-            app.NumberofTrialsEditField.Position = [78 96 68 22];
-            app.NumberofTrialsEditField.Limits = [0 Inf];
-            app.NumberofTrialsEditField.Value = 2000;
-            app.NumberofTrialsEditField.Tooltip = 'Total frames to simulate per point. 0 = skip simulating and only render a figure.';
-
+            % The per-point frame target lives in the FRAMES PER POINT card
+            % below (2026-10-13); this card keeps only how often to save.
             app.TrialsPerIterationEditFieldLabel = uilabel(app.RunPanel);
             app.TrialsPerIterationEditFieldLabel.HorizontalAlignment = 'right';
-            app.TrialsPerIterationEditFieldLabel.Position = [154 96 78 20];
-            app.TrialsPerIterationEditFieldLabel.Text = '/ Iteration';
+            app.TrialsPerIterationEditFieldLabel.Position = [8 96 224 20];
+            app.TrialsPerIterationEditFieldLabel.Text = 'Frames between database saves';
 
             app.TrialsPerIterationEditField = uieditfield(app.RunPanel, 'numeric');
             app.TrialsPerIterationEditField.Position = [236 96 68 22];
-            app.TrialsPerIterationEditField.Limits = [0 Inf];
+            app.TrialsPerIterationEditField.Limits = [1 Inf];
+            app.TrialsPerIterationEditField.RoundFractionalValues = 'on';
             app.TrialsPerIterationEditField.Value = 10;
-            app.TrialsPerIterationEditField.Tooltip = 'Frames simulated between each results save / figure refresh.';
+            app.TrialsPerIterationEditField.Tooltip = ['Frames each point simulates before its results are written to the database ' ...
+                '(the figure also refreshes then). Smaller saves more often and loses less if a run stops; ' ...
+                'larger makes fewer database writes. It does not change how many frames a point gets in total.'];
 
             app.ParallelizationCheckBox = uicheckbox(app.RunPanel);
             app.ParallelizationCheckBox.Text = 'Parallelization';
@@ -840,47 +874,87 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.ResultsTableValueLabel.Text = app.ResultsTableName;
             app.ResultsTableValueLabel.Tooltip = 'Every project writes to this one shared, merged results table - it is not a per-run choice.';
 
-            %% Adaptive stopping card
+            %% Frames per point card (replaced ADAPTIVE STOPPING, 2026-10-13)
+            % Adaptive stopping was retired: switching it on wiped
+            % metrics_aux on every row of the shared table before a run.
+            % Points now run to a frame target, either one number for every
+            % point or two numbers chosen by each point's error rate, which
+            % sim_head re-judges after every save.
             app.ConvergencePanel = uipanel(app.UIFigure);
-            app.ConvergencePanel.Title = 'ADAPTIVE STOPPING';
+            app.ConvergencePanel.Title = 'FRAMES PER POINT';
             app.ConvergencePanel.Position = [266 126 320 150];
 
-            app.EnableAdaptiveCheckBox = uicheckbox(app.ConvergencePanel);
-            app.EnableAdaptiveCheckBox.Text = 'Enable Adaptive Stopping';
-            app.EnableAdaptiveCheckBox.Position = [8 96 220 22];
-            app.EnableAdaptiveCheckBox.Value = false;
-            app.EnableAdaptiveCheckBox.Tooltip = 'Stop simulating a point early once its metric estimate has converged, instead of always running the full frame count.';
+            app.FrameSplitCheckBox = uicheckbox(app.ConvergencePanel);
+            app.FrameSplitCheckBox.Text = 'Set frames by error rate';
+            app.FrameSplitCheckBox.Position = [8 96 190 22];
+            app.FrameSplitCheckBox.Value = false;
+            app.FrameSplitCheckBox.ValueChangedFcn = createCallbackFcn(app, @FrameSplitCheckBoxValueChanged, true);
+            app.FrameSplitCheckBox.Tooltip = ['Give points with a low error rate more frames than points with a high one. ' ...
+                'Each point is judged by its stored value of the metric on the right after every save; ' ...
+                'a point with no data yet starts on the high-rate count.'];
 
-            app.ToleranceEditFieldLabel = uilabel(app.ConvergencePanel);
-            app.ToleranceEditFieldLabel.HorizontalAlignment = 'right';
-            app.ToleranceEditFieldLabel.Position = [8 68 80 20];
-            app.ToleranceEditFieldLabel.Text = 'Tolerance';
+            app.FrameSplitMetricDropDown = uidropdown(app.ConvergencePanel);
+            app.FrameSplitMetricDropDown.Position = [214 96 98 22];
+            app.FrameSplitMetricDropDown.Items = {'BER', 'BER_info'};
+            app.FrameSplitMetricDropDown.Value = 'BER';
+            app.FrameSplitMetricDropDown.Tooltip = ['Which error rate decides. BER is the raw (uncoded) rate; BER_info is the ' ...
+                'rate after LDPC decoding. For coded profiles raw BER stays near 2e-2 everywhere, so use BER_info.'];
 
-            app.ToleranceEditField = uieditfield(app.ConvergencePanel, 'numeric');
-            app.ToleranceEditField.Position = [92 68 70 22];
-            app.ToleranceEditField.Limits = [0 1];
-            app.ToleranceEditField.Value = 0.1;
+            app.NumberofTrialsEditFieldLabel = uilabel(app.ConvergencePanel);
+            app.NumberofTrialsEditFieldLabel.HorizontalAlignment = 'right';
+            app.NumberofTrialsEditFieldLabel.Position = [8 68 120 20];
+            app.NumberofTrialsEditFieldLabel.Text = 'All points';
 
-            app.MinFramesEditFieldLabel = uilabel(app.ConvergencePanel);
-            app.MinFramesEditFieldLabel.HorizontalAlignment = 'right';
-            app.MinFramesEditFieldLabel.Position = [172 68 80 20];
-            app.MinFramesEditFieldLabel.Text = 'Min Frames';
+            app.NumberofTrialsEditField = uieditfield(app.ConvergencePanel, 'numeric');
+            app.NumberofTrialsEditField.Position = [132 68 80 22];
+            app.NumberofTrialsEditField.Limits = [0 Inf];
+            app.NumberofTrialsEditField.RoundFractionalValues = 'on';
+            app.NumberofTrialsEditField.Value = 2000;
+            app.NumberofTrialsEditField.Tooltip = ['Frames every point is simulated to. 0 = skip simulating and only render a figure. ' ...
+                'With a Runtime statistic selected, this is the number of timed frames per point.'];
 
-            app.MinFramesEditField = uieditfield(app.ConvergencePanel, 'numeric');
-            app.MinFramesEditField.Position = [256 68 56 22];
-            app.MinFramesEditField.Limits = [0 Inf];
-            app.MinFramesEditField.Value = 100;
+            app.FrameSplitThresholdLabel = uilabel(app.ConvergencePanel);
+            app.FrameSplitThresholdLabel.HorizontalAlignment = 'right';
+            app.FrameSplitThresholdLabel.Position = [8 40 120 20];
+            app.FrameSplitThresholdLabel.Text = 'Error-rate threshold';
 
-            app.ConfidenceDropDownLabel = uilabel(app.ConvergencePanel);
-            app.ConfidenceDropDownLabel.HorizontalAlignment = 'right';
-            app.ConfidenceDropDownLabel.Position = [8 34 80 20];
-            app.ConfidenceDropDownLabel.Text = 'Confidence';
+            app.FrameSplitThresholdEditField = uieditfield(app.ConvergencePanel, 'numeric');
+            app.FrameSplitThresholdEditField.Position = [132 40 80 22];
+            app.FrameSplitThresholdEditField.Limits = [0 1];
+            app.FrameSplitThresholdEditField.LowerLimitInclusive = 'off';
+            app.FrameSplitThresholdEditField.ValueDisplayFormat = '%.3g';
+            app.FrameSplitThresholdEditField.Value = 1e-3;
+            app.FrameSplitThresholdEditField.Tooltip = 'Points at or above this error rate get the first count below; points under it get the second.';
 
-            app.ConfidenceDropDown = uidropdown(app.ConvergencePanel);
-            app.ConfidenceDropDown.Position = [92 34 70 22];
-            app.ConfidenceDropDown.Items = {'0.90', '0.95', '0.99'};
-            app.ConfidenceDropDown.ItemsData = {0.90, 0.95, 0.99};
-            app.ConfidenceDropDown.Value = 0.95;
+            app.FramesHighBerLabel = uilabel(app.ConvergencePanel);
+            app.FramesHighBerLabel.HorizontalAlignment = 'right';
+            app.FramesHighBerLabel.Position = [8 12 52 20];
+            app.FramesHighBerLabel.Text = 'At/above';
+
+            app.FramesHighBerEditField = uieditfield(app.ConvergencePanel, 'numeric');
+            app.FramesHighBerEditField.Position = [64 12 64 22];
+            app.FramesHighBerEditField.Limits = [1 Inf];
+            app.FramesHighBerEditField.RoundFractionalValues = 'on';
+            app.FramesHighBerEditField.Value = 2000;
+            app.FramesHighBerEditField.Tooltip = 'Frames for a point whose error rate is at or above the threshold.';
+
+            app.FramesLowBerLabel = uilabel(app.ConvergencePanel);
+            app.FramesLowBerLabel.HorizontalAlignment = 'right';
+            app.FramesLowBerLabel.Position = [132 12 44 20];
+            app.FramesLowBerLabel.Text = 'Below';
+
+            app.FramesLowBerEditField = uieditfield(app.ConvergencePanel, 'numeric');
+            app.FramesLowBerEditField.Position = [180 12 64 22];
+            app.FramesLowBerEditField.Limits = [1 Inf];
+            app.FramesLowBerEditField.RoundFractionalValues = 'on';
+            app.FramesLowBerEditField.Value = 5000;
+            app.FramesLowBerEditField.Tooltip = 'Frames for a point whose error rate is below the threshold.';
+
+            app.FramesUnitLabel = uilabel(app.ConvergencePanel);
+            app.FramesUnitLabel.Position = [250 12 60 20];
+            app.FramesUnitLabel.Text = 'frames';
+
+            updateFrameControls(app);
 
             %% Output card
             app.OutputPanel = uipanel(app.UIFigure);
