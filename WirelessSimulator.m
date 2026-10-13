@@ -9,6 +9,9 @@ classdef WirelessSimulator < matlab.apps.AppBase
     % otfs_journal/sim_results tables) - it's fixed, not a GUI option.
     properties (Constant, Access = private)
         ResultsTableName = 'sim_lookup'
+        FrameSplitTooltip = ['Give points with a low error rate more frames than points with a high one. ' ...
+            'Each point is judged by its stored value of the metric on the right after every save; ' ...
+            'a point with no data yet starts on the high-rate count. Not available with a Runtime statistic.']
     end
 
     % Internal state (not UI components)
@@ -84,6 +87,9 @@ classdef WirelessSimulator < matlab.apps.AppBase
     methods (Access = private)
 
         function startupFcn(app)
+            % A fresh console on launch and on Simulate / Generate Figure,
+            % so what is on screen belongs to the action just taken.
+            clc;
             refreshProfiles(app);
             setStatus(app, "Ready.", false);
         end
@@ -537,6 +543,23 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
         function updateFrameControls(app)
             % One target for every point, or two chosen by error rate.
+            %
+            % RUNTIME TIMES EVERY POINT OVER THE SAME FRAME COUNT, so with a
+            % Runtime statistic selected the split is unticked and locked:
+            % arms timed over different numbers of frames would not be
+            % compared on equal footing. Choosing a performance statistic
+            % unlocks it again (left unticked).
+            % The Frames card is built before the Statistic dropdown, so on
+            % that first call there is no statistic to check yet.
+            if ~isempty(app.FigureStatisticDropDown) && isCostStatistic(app)
+                app.FrameSplitCheckBox.Value  = false;
+                app.FrameSplitCheckBox.Enable = 'off';
+                app.FrameSplitCheckBox.Tooltip = ['Not available with a Runtime statistic: runtime is timed ' ...
+                    'over the same "All points" frame count for every point.'];
+            else
+                app.FrameSplitCheckBox.Enable = 'on';
+                app.FrameSplitCheckBox.Tooltip = app.FrameSplitTooltip;
+            end
             split = app.FrameSplitCheckBox.Value;
             onoff = {'off', 'on'};
             app.NumberofTrialsEditField.Enable      = onoff{~split + 1};
@@ -551,6 +574,10 @@ classdef WirelessSimulator < matlab.apps.AppBase
         end
 
         function FrameSplitCheckBoxValueChanged(app, ~)
+            updateFrameControls(app);
+        end
+
+        function FigureStatisticDropDownValueChanged(app, ~)
             updateFrameControls(app);
         end
 
@@ -614,6 +641,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
         end
 
         function SimulateButtonPushed(app, ~)
+            clc;
             if isempty(app.ProfileListBox.Value)
                 setStatus(app, "Select a profile first.", true);
                 return;
@@ -670,6 +698,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
         end
 
         function GenerateFigureButtonPushed(app, ~)
+            clc;
             if isempty(app.ProfileListBox.Value)
                 setStatus(app, "Select a profile first.", true);
                 return;
@@ -889,9 +918,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.FrameSplitCheckBox.Position = [8 96 190 22];
             app.FrameSplitCheckBox.Value = false;
             app.FrameSplitCheckBox.ValueChangedFcn = createCallbackFcn(app, @FrameSplitCheckBoxValueChanged, true);
-            app.FrameSplitCheckBox.Tooltip = ['Give points with a low error rate more frames than points with a high one. ' ...
-                'Each point is judged by its stored value of the metric on the right after every save; ' ...
-                'a point with no data yet starts on the high-rate count.'];
+            app.FrameSplitCheckBox.Tooltip = app.FrameSplitTooltip;
 
             app.FrameSplitMetricDropDown = uidropdown(app.ConvergencePanel);
             app.FrameSplitMetricDropDown.Position = [214 96 98 22];
@@ -980,6 +1007,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
             % entries will join them when that pipeline exists.
             app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 'recon_mse', 'Runtime: estimator', 'Runtime: detector'};
             app.FigureStatisticDropDown.Value = 'BER';
+            app.FigureStatisticDropDown.ValueChangedFcn = createCallbackFcn(app, @FigureStatisticDropDownValueChanged, true);
             app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view. Runtime entries are measured back to back by cost_head.m (Simulate times Number of Trials frames per point, Parallelization must be off; Generate Figure shows the newest saved measurement).';
 
             %% Status strip
