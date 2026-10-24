@@ -8,3 +8,12 @@ Thumbs.db
 
 # Test fixtures
 tests/fixtures/
+
+# Run artefacts and binary dumps
+*.log
+*.mat
+*.bak
+scratchpad/
+
+# Local MySQL credentials - machine-specific, never commit
+mysql_local.json

@@ -8,7 +8,7 @@ function creds = get_mysql_credentials()
 % credentials; every call after that reads the cached file silently.
 %
 % Returns [] if the user opts out of MySQL entirely, meaning callers
-% should fall back to local (Excel) storage instead of connecting.
+% should use a local file store instead (CWS: local_store_setup).
 
 cred_file = fullfile(pwd, 'mysql_local.json');
 
@@ -28,7 +28,7 @@ if is_port_open('localhost', port, 1.5)
     user_in = strtrim(input('MySQL username [root]: ', 's'));
 else
     fprintf('No local MySQL server detected on localhost:%d.\n', port);
-    host = strtrim(input('Enter a MySQL host to use, or press Enter to use local Excel storage only: ', 's'));
+    host = strtrim(input('Enter a MySQL host to use, or press Enter to skip MySQL (results then go to a local file store): ', 's'));
     if isempty(host)
         creds = [];
         return
@@ -51,7 +51,7 @@ try
     close(test_conn);
 catch ME
     error(['Could not connect to MySQL with those credentials (%s).\n' ...
-        'Re-run to try again, or leave the host blank next time to use local Excel storage only.'], ME.message);
+        'Re-run to try again, or leave the host blank next time to skip MySQL.'], ME.message);
 end
 
 creds = struct('host', host, 'user', user_in, 'password', password);

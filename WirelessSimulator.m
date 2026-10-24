@@ -12,12 +12,15 @@ classdef WirelessSimulator < matlab.apps.AppBase
         FrameSplitTooltip = ['Give points with a low error rate more frames than points with a high one. ' ...
             'Each point is judged by its stored value of the metric on the right after every save; ' ...
             'a point with no data yet starts on the high-rate count. Not available with a Runtime statistic.']
+        % Every statistic the Statistic dropdown can offer; updateStatisticItems narrows it per profile
+        AllStatistics = {'BER', 'SER', 'FER', 'Thr', 'Thr_coded', 'Thr_coded_cw', 'BER_info', 'FER_info', 'CWER', 'LDPC_conv', 'RX_iters', 'recon_mse', 'recon_mse_r1', 'Runtime: estimator', 'Runtime: Hhat reconstruction', 'Runtime: estimator + Hhat', 'Runtime: estimator per call', 'Runtime: detector'}
     end
 
     % Internal state (not UI components)
     properties (Access = private)
         AllProfiles     cell = {}
         AllProfileNames cell = {}
+        StorageView     table = table()   % storage_view rows behind the Storage table
     end
 
     % UI Components
@@ -47,15 +50,14 @@ classdef WirelessSimulator < matlab.apps.AppBase
         IgnoreErrorsCheckBox             matlab.ui.control.CheckBox
         IterativelyRenderCheckBox        matlab.ui.control.CheckBox
         DeleteSelectedConfigsCheckBox    matlab.ui.control.CheckBox
+        DontSaveCheckBox                 matlab.ui.control.CheckBox
 
         % Storage card
         StoragePanel                     matlab.ui.container.Panel
-        SavePriorityDropDown             matlab.ui.control.DropDown
-        SavePriorityDropDownLabel        matlab.ui.control.Label
-        EnableMySQLCheckBox              matlab.ui.control.CheckBox
-        SaveExcelCheckBox                matlab.ui.control.CheckBox
-        ResultsTableCaptionLabel         matlab.ui.control.Label
-        ResultsTableValueLabel           matlab.ui.control.Label
+        StorageTable                     matlab.ui.control.Table
+        StorageApplyButton               matlab.ui.control.Button
+        StorageRefreshExcelButton        matlab.ui.control.Button
+        StorageReloadButton              matlab.ui.control.Button
 
         % Frames per point card (was Adaptive stopping)
         ConvergencePanel                 matlab.ui.container.Panel
@@ -73,6 +75,13 @@ classdef WirelessSimulator < matlab.apps.AppBase
         OutputPanel                      matlab.ui.container.Panel
         FigureStatisticDropDown          matlab.ui.control.DropDown
         FigureStatisticDropDownLabel     matlab.ui.control.Label
+        VisualizationTypeDropDown        matlab.ui.control.DropDown
+        VisualizationTypeDropDownLabel   matlab.ui.control.Label
+        LegendLocationDropDown           matlab.ui.control.DropDown
+        LegendLocationDropDownLabel      matlab.ui.control.Label
+        YLimitsLabel                     matlab.ui.control.Label
+        YLimMinEditField                 matlab.ui.control.NumericEditField
+        YLimMaxEditField                 matlab.ui.control.NumericEditField
 
         % Status strip + actions
         ProgressTrackPanel               matlab.ui.container.Panel
@@ -91,7 +100,119 @@ classdef WirelessSimulator < matlab.apps.AppBase
             % so what is on screen belongs to the action just taken.
             clc;
             refreshProfiles(app);
+            refreshStorage(app);
             setStatus(app, "Ready.", false);
+        end
+
+        %% Storage card: this computer's result stores (storage step 7a, notes/STORAGE_BACKENDS_PLAN.md 8 and 13b)
+
+        function refreshStorage(app)
+            % Rows from storage_view; a computer without a registry entry shows a note instead
+            try
+                V = storage_view();
+            catch ME
+                app.StorageTable.Data = {false, [], '', '', char("Could not read the store list: " + ME.message)};
+                return;
+            end
+            app.StorageView = V;
+            app.StoragePanel.Title = char("STORAGE  " + host_id());
+
+            % One table row per store; the primary row is shown but not editable (StorageTableCellEdit puts it back)
+            if height(V) == 0
+                app.StorageTable.Data = {false, [], '', '', 'This computer has no entry in db_sources.json.'};
+                return;
+            end
+            app.StorageTable.Data = [num2cell(V.use), num2cell(V.order), cellstr(V.kind), cellstr(V.location), cellstr(V.status)];
+        end
+
+        function StorageTableCellEdit(app, event)
+            % Only Use and Order are edited, never on the primary row; edits stay in the panel until Apply
+            r = event.Indices(1); c = event.Indices(2);
+            V = app.StorageView;
+            if r > height(V) || V.locked(r)
+                app.StorageTable.Data{r, c} = event.PreviousData;
+                setStatus(app, "The primary store can not be changed here (that is a migration).", true);
+                return;
+            end
+            if c == 1, V.use(r) = logical(event.NewData); end
+            if c == 2, V.order(r) = double(event.NewData); end
+            app.StorageView = V;
+        end
+
+        function StorageApplyButtonPushed(app, ~)
+            % Confirm, save stores.json (storage_apply), then offer to build any new SQLite or text mirror
+            V = app.StorageView;
+            if height(V) == 0, return; end
+            msg = sprintf(['Save this computer''s store list?\n\nMirrors in use: %s\n\n' ...
+                'A removed mirror only leaves the list; its files stay on disk. ' ...
+                'A new SQLite or text mirror gets no writes until it is built from the primary.'], ...
+                strjoin(V.kind(V.use & ~V.locked) + " (" + V.location(V.use & ~V.locked) + ")", ", "));
+            if ~strcmp(uiconfirm(app.UIFigure, msg, 'Storage', 'Options', {'Save', 'Cancel'}, 'DefaultOption', 2), 'Save')
+                return;
+            end
+            try
+                out = storage_apply(V);
+            catch ME
+                showErrorDialog(app, ME);
+                refreshStorage(app);
+                return;
+            end
+
+            % New SQLite or text mirrors: build now, under the collection hold (store_resync needs it)
+            if ~isempty(out.new_mirrors)
+                buildNewMirrors(app, out);
+            elseif ~isempty(out.new_excel)
+                setStatus(app, "Saved. The Excel mirror is written at the end of the next run, or with Refresh Excel.", false);
+            else
+                setStatus(app, "Store list saved.", false);
+            end
+            refreshStorage(app);
+        end
+
+        function buildNewMirrors(app, out)
+            % Build each new mirror from the primary with store_resync, taking the hold only if it isn't already there
+            cws = fileparts(fileparts(mfilename('fullpath')));
+            hold_file = fullfile(cws, 'collectors', "HOLD_" + host_id());
+            note = "";
+            if out.others_running > 0
+                note = sprintf('\n\n%d other MATLAB process(es) are running here. A collector among them keeps writing, so the build will not match and the mirror stays stale: build it after they finish.', out.others_running);
+            end
+            msg = sprintf('Build the new mirror(s) from the primary now?%s', note);
+            if ~strcmp(uiconfirm(app.UIFigure, msg, 'Storage', 'Options', {'Build now', 'Later'}, 'DefaultOption', 2), 'Build now')
+                setStatus(app, "Saved. New mirror(s) stay stale until built (store_resync under the hold).", false);
+                return;
+            end
+
+            % The hold stops new collectors while the copy is made; removed afterwards only if this made it
+            made_hold = ~isfile(hold_file);
+            if made_hold
+                fid = fopen(hold_file, 'w'); fprintf(fid, 'GUI: building a new mirror (%s)', char(datetime('now'))); fclose(fid);
+            end
+            ok = true;
+            for i = 1:numel(out.new_mirrors)
+                try
+                    r = store_resync(out.new_mirrors(i));
+                    ok = ok && r.ok;
+                catch ME
+                    ok = false;
+                    disp(getReport(ME, 'extended', 'hyperlinks', 'off'));
+                end
+            end
+            if made_hold, delete(hold_file); end
+            if ok
+                setStatus(app, "Saved, and the new mirror(s) were built and checked.", false);
+            else
+                setStatus(app, "Saved, but a new mirror did not build cleanly; it stays stale (see Command Window).", true);
+            end
+        end
+
+        function StorageRefreshExcelButtonPushed(app, ~)
+            % Rewrite this computer's Excel mirrors from the primary now
+            setStatus(app, "Refreshing Excel...", false);
+            drawnow;
+            store_flush("excel");
+            refreshStorage(app);
+            setStatus(app, "Excel refresh done (see the Status column).", false);
         end
 
         %% Profile list: population, filtering, subtitle text
@@ -162,6 +283,33 @@ classdef WirelessSimulator < matlab.apps.AppBase
             end
             app.ProfileTitleLabel.Text = app.AllProfileNames{idx};
             app.ProfileSubtitleLabel.Text = profileSubtitle(app, app.AllProfiles{idx});
+            updateStatisticItems(app, app.AllProfiles{idx});
+        end
+
+        function updateStatisticItems(app, profile)
+            % Offer only the statistics some config of this profile records. A project without
+            % profile_metrics.m, or a profile it cannot read, keeps the full list.
+            if isempty(app.FigureStatisticDropDown), return; end
+            items = app.AllStatistics;
+            if exist('profile_metrics', 'file') == 2
+                try
+                    keep = cellstr(profile_metrics(profile));
+                    items = items(ismember(items, keep));
+                catch ME
+                    warning('WirelessSimulator:profileMetrics', 'profile_metrics failed (%s); listing every statistic.', ME.message);
+                end
+            end
+            if isempty(items), items = app.AllStatistics; end
+
+            % Keep the current choice when it is still offered, else fall back to the first entry
+            prev = app.FigureStatisticDropDown.Value;
+            app.FigureStatisticDropDown.Items = items;
+            if ismember(prev, items)
+                app.FigureStatisticDropDown.Value = prev;
+            else
+                app.FigureStatisticDropDown.Value = items{1};
+            end
+            updateFrameControls(app);
         end
 
         function ProfileSearchFieldValueChanging(app, event)
@@ -293,29 +441,18 @@ classdef WirelessSimulator < matlab.apps.AppBase
             counts = nan(nP,nC);
             errMsg = '';
             try
-                conn = mysql_login("comm_database");
-                cleanupConn = onCleanup(@() close(conn));
-                hashes = cell(nP,nC);
+                tgt = db_target();
+                conn = store_connect(tgt);   % MySQL, or a SQLite/text primary (storage step 7b)
+                cleanupConn = onCleanup(@() close_store(conn));
+                % Each point's hash and whether it is a real point, from the one shared definition (item 6, 2026-10-21)
+                hashes = repmat({''}, nP, nC);
                 for c = 1:nC
                     for r = 1:nP
-                        parameters = profile.default_parameters;
-                        parameters.(primary_var) = primary_vals(r);
-                        ov = configs{c};
-                        fn = fieldnames(ov);
-                        for k = 1:numel(fn)
-                            parameters.(fn{k}) = ov.(fn{k});
-                        end
-                        % Mirror sim_head.m's own ODDM scrubbing, or the
-                        % hashes will not match what was actually written.
-                        if isfield(parameters,'system_name') && parameters.system_name == "ODDM" ...
-                                && isfield(parameters,'U')
-                            parameters = rmfield(parameters,'U');
-                        end
-                        [~, h] = jsonencode_sorted(parameters);
-                        hashes{r,c} = h;
+                        [~, hashes{r,c}, is_point(r,c)] = build_point_params(profile, primary_vals(r), c);
                     end
                 end
-                T = mysql_load(conn, app.ResultsTableName, hashes(:));
+
+                T = load_merged(conn, tgt.dbname, tgt.table, hashes(is_point), table, 30);
                 if ~isempty(T)
                     allH = string(T.param_hash);
                     for c = 1:nC
@@ -514,10 +651,8 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.table_name          = app.ResultsTableName;
             settings.use_parallel        = app.ParallelizationCheckBox.Value;
             settings.frames_per_iter     = app.TrialsPerIterationEditField.Value;
-            settings.priority            = app.SavePriorityDropDown.Value;
-            settings.save_mysql          = app.EnableMySQLCheckBox.Value;
-            settings.save_excel          = app.SaveExcelCheckBox.Value;
             settings.profile_sel         = app.ProfileListBox.Value;
+            settings.dont_save           = app.DontSaveCheckBox.Value;   % exploration run: nothing saved (storage step 7a.1)
             % FRAME TARGETS (2026-10-13, replacing adaptive stopping).
             % num_frames stays the "all points" target; with the split on
             % it is the largest target so a sim_head without split
@@ -536,6 +671,9 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.iteratively_render  = app.IterativelyRenderCheckBox.Value;
             settings.delete_sel          = app.DeleteSelectedConfigsCheckBox.Value;
             settings.figure_statistic    = app.FigureStatisticDropDown.Value;
+            settings.vis_type            = app.VisualizationTypeDropDown.Value;
+            settings.legend_loc          = app.LegendLocationDropDown.Value;
+            settings.ylim_vec            = [app.YLimMinEditField.Value, app.YLimMaxEditField.Value];
             settings.progress_fcn        = @(d) handleProgress(app, d);
             settings.convergence_fcn     = @(iter, num_iters, current_frames, n_suff, n_total) ...
                 handleConvergence(app, iter, num_iters, current_frames, n_suff, n_total);
@@ -692,9 +830,14 @@ classdef WirelessSimulator < matlab.apps.AppBase
                     end
                 end
             end
-            if ~stopped_on_error
+            if ~stopped_on_error && settings.dont_save
+                setStatus(app, "Done (exploration run: nothing was saved).", false);
+            elseif ~stopped_on_error
                 setStatus(app, "Done.", false);
             end
+
+            % The run may have flagged a mirror or refreshed the Excel mirror
+            refreshStorage(app);
         end
 
         function GenerateFigureButtonPushed(app, ~)
@@ -712,6 +855,7 @@ classdef WirelessSimulator < matlab.apps.AppBase
             settings.num_frames         = 0;
             settings.iteratively_render = false;
             settings.delete_sel         = false;
+            settings.dont_save          = false;   % a figure is drawn from the stored results
             % PROGRESS BAR (added 2026-09-23). Figure generation emits no
             % progress callbacks -- sim_head is called here with num_frames=0
             % and no progress_fcn -- so the bar cannot fill incrementally the
@@ -860,48 +1004,46 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.DeleteSelectedConfigsCheckBox.Value = false;
             app.DeleteSelectedConfigsCheckBox.Tooltip = 'Erase and re-simulate any configs flagged in the profile''s delete_configs list.';
 
+            % Exploration run: simulate and render, write nothing to any store (storage step 7a.1)
+            app.DontSaveCheckBox = uicheckbox(app.RunPanel);
+            app.DontSaveCheckBox.Text = 'Don''t save (exploration)';
+            app.DontSaveCheckBox.Position = [160 40 156 22];
+            app.DontSaveCheckBox.Value = false;
+            app.DontSaveCheckBox.Tooltip = ['Simulate and draw the figure from this run''s frames only, and save nothing: ' ...
+                'no results store, mirror, Excel or frame log. Can''t be combined with Delete Selected Configs.'];
+
             %% Storage card
             app.StoragePanel = uipanel(app.UIFigure);
             app.StoragePanel.Title = 'STORAGE';
-            app.StoragePanel.Position = [606 296 324 150];
+            app.StoragePanel.Position = [606 296 438 158];   % widened 324->438 and 8 px taller for the store table (storage step 7a)
 
-            app.SavePriorityDropDownLabel = uilabel(app.StoragePanel);
-            app.SavePriorityDropDownLabel.HorizontalAlignment = 'right';
-            app.SavePriorityDropDownLabel.Position = [8 96 68 20];
-            app.SavePriorityDropDownLabel.Text = 'Priority';
+            % This computer's stores: primary first, then mirrors; unticked rows are kinds it could add
+            app.StorageTable = uitable(app.StoragePanel);
+            app.StorageTable.Position = [8 30 422 106];
+            app.StorageTable.ColumnName = {'Use', '#', 'Kind', 'Location', 'Status'};
+            app.StorageTable.ColumnWidth = {36, 26, 44, 146, 'auto'};
+            app.StorageTable.ColumnEditable = [true true false false false];
+            app.StorageTable.RowName = {};
+            app.StorageTable.FontSize = 9;
+            app.StorageTable.CellEditCallback = createCallbackFcn(app, @StorageTableCellEdit, true);
+            app.StorageTable.Tooltip = ['Where this computer keeps its results. Row 1 is the primary; ticked rows below it are ' ...
+                'mirrors, written with every batch (Excel: at the end of each run). Other computers read the first usable one.'];
 
-            app.SavePriorityDropDown = uidropdown(app.StoragePanel);
-            app.SavePriorityDropDown.Position = [80 96 90 22];
-            app.SavePriorityDropDown.Items = {'local', 'mysql'};
-            app.SavePriorityDropDown.Value = 'mysql';
-            app.SavePriorityDropDown.Tooltip = 'Which existing results to check first when resuming a partially-simulated profile.';
+            % Save the list, refresh Excel, re-read the status
+            app.StorageApplyButton = uibutton(app.StoragePanel, 'push');
+            app.StorageApplyButton.Position = [8 4 80 22];
+            app.StorageApplyButton.Text = 'Apply';
+            app.StorageApplyButton.ButtonPushedFcn = createCallbackFcn(app, @StorageApplyButtonPushed, true);
 
-            app.EnableMySQLCheckBox = uicheckbox(app.StoragePanel);
-            app.EnableMySQLCheckBox.Text = 'Enable MySQL';
-            app.EnableMySQLCheckBox.Position = [8 68 130 22];
-            app.EnableMySQLCheckBox.Value = true;
+            app.StorageRefreshExcelButton = uibutton(app.StoragePanel, 'push');
+            app.StorageRefreshExcelButton.Position = [96 4 100 22];
+            app.StorageRefreshExcelButton.Text = 'Refresh Excel';
+            app.StorageRefreshExcelButton.ButtonPushedFcn = createCallbackFcn(app, @StorageRefreshExcelButtonPushed, true);
 
-            app.SaveExcelCheckBox = uicheckbox(app.StoragePanel);
-            app.SaveExcelCheckBox.Text = 'Save Excel';
-            app.SaveExcelCheckBox.Position = [8 40 100 22];
-            app.SaveExcelCheckBox.Value = false;
-
-            resultsTableBox = uipanel(app.StoragePanel);
-            resultsTableBox.BorderType = 'line';
-            resultsTableBox.BackgroundColor = [0.957 0.973 0.984];
-            resultsTableBox.Position = [8 6 300 28];
-
-            app.ResultsTableCaptionLabel = uilabel(resultsTableBox);
-            app.ResultsTableCaptionLabel.Position = [8 1 100 26];
-            app.ResultsTableCaptionLabel.FontSize = 9;
-            app.ResultsTableCaptionLabel.FontColor = [0.29 0.48 0.61];
-            app.ResultsTableCaptionLabel.Text = 'RESULTS TABLE';
-
-            app.ResultsTableValueLabel = uilabel(resultsTableBox);
-            app.ResultsTableValueLabel.Position = [110 1 180 26];
-            app.ResultsTableValueLabel.FontColor = [0.04 0.24 0.36];
-            app.ResultsTableValueLabel.Text = app.ResultsTableName;
-            app.ResultsTableValueLabel.Tooltip = 'Every project writes to this one shared, merged results table - it is not a per-run choice.';
+            app.StorageReloadButton = uibutton(app.StoragePanel, 'push');
+            app.StorageReloadButton.Position = [204 4 70 22];
+            app.StorageReloadButton.Text = 'Reload';
+            app.StorageReloadButton.ButtonPushedFcn = @(~, ~) refreshStorage(app);
 
             %% Frames per point card (replaced ADAPTIVE STOPPING, 2026-10-13)
             % Adaptive stopping was retired: switching it on wiped
@@ -995,6 +1137,16 @@ classdef WirelessSimulator < matlab.apps.AppBase
 
             app.FigureStatisticDropDown = uidropdown(app.OutputPanel);
             app.FigureStatisticDropDown.Position = [102 96 140 22];
+            % Thr_coded / Thr_coded_cw added 2026-10-05. 'Thr' is the UNCODED
+            % metric and is identically 0 for any scheme whose raw BER
+            % exceeds roughly 1e-4 at this frame size (its (1-FER) factor
+            % saturates), so it cannot show a coded result at all. The two
+            % coded metrics count information bits delivered after
+            % decoding: Thr_coded requires every codeword in the frame to
+            % be correct, Thr_coded_cw credits each correct codeword and so
+            % still discriminates near FER = 1. Also exposing BER_info,
+            % CWER, FER_info and LDPC_conv, which the coded profiles write
+            % but the GUI had no way to plot.
             % TIMING (2026-10-13). t_RXfull, t_RXiter, t_RXcpufull,
             % t_RXcpuiter, t_ESTcpufull and t_ESTcpuiter are no longer
             % offered. They are read from the results table, where frames
@@ -1005,10 +1157,51 @@ classdef WirelessSimulator < matlab.apps.AppBase
             % the stages back to back in this one process (see
             % isCostStatistic and runCostPipeline below). "FLOPs: ..."
             % entries will join them when that pipeline exists.
-            app.FigureStatisticDropDown.Items = {'BER', 'SER', 'FER', 'Thr', 'RX_iters', 'recon_mse', 'Runtime: estimator', 'Runtime: detector'};
+            app.FigureStatisticDropDown.Items = app.AllStatistics;
             app.FigureStatisticDropDown.Value = 'BER';
             app.FigureStatisticDropDown.ValueChangedFcn = createCallbackFcn(app, @FigureStatisticDropDownValueChanged, true);
-            app.FigureStatisticDropDown.Tooltip = 'Overrides the profile''s own metric when rendering a figure. Leave as the profile default unless you need a different view. Runtime entries are measured back to back by cost_head.m (Simulate times Number of Trials frames per point, Parallelization must be off; Generate Figure shows the newest saved measurement).';
+            app.FigureStatisticDropDown.Tooltip = 'Which metric to plot. Since 2026-10-07 this is the only source - profiles no longer carry a data_type. Runtime entries are measured back to back by cost_head.m (Simulate times Number of Trials frames per point, Parallelization must be off; Generate Figure shows the newest saved measurement).';
+
+            app.VisualizationTypeDropDownLabel = uilabel(app.OutputPanel);
+            app.VisualizationTypeDropDownLabel.HorizontalAlignment = 'right';
+            app.VisualizationTypeDropDownLabel.Position = [8 70 90 20];
+            app.VisualizationTypeDropDownLabel.Text = 'Visualization';
+
+            app.VisualizationTypeDropDown = uidropdown(app.OutputPanel);
+            app.VisualizationTypeDropDown.Position = [102 70 140 22];
+            app.VisualizationTypeDropDown.Items = {'figure', 'table'};
+            app.VisualizationTypeDropDown.Value = 'figure';
+            app.VisualizationTypeDropDown.Tooltip = 'How to render the selected profile. Moved here from the profile itself on 2026-10-07.';
+
+            app.LegendLocationDropDownLabel = uilabel(app.OutputPanel);
+            app.LegendLocationDropDownLabel.HorizontalAlignment = 'right';
+            app.LegendLocationDropDownLabel.Position = [8 44 90 20];
+            app.LegendLocationDropDownLabel.Text = 'Legend';
+
+            app.LegendLocationDropDown = uidropdown(app.OutputPanel);
+            app.LegendLocationDropDown.Position = [102 44 140 22];
+            app.LegendLocationDropDown.Items = {'northeast', 'northwest', 'southeast', 'southwest'};
+            app.LegendLocationDropDown.Value = 'southeast';
+            app.LegendLocationDropDown.Tooltip = 'Legend corner. Overrides the per-metric default in gen_figure.';
+
+            app.YLimitsLabel = uilabel(app.OutputPanel);
+            app.YLimitsLabel.HorizontalAlignment = 'right';
+            app.YLimitsLabel.Position = [8 18 90 20];
+            app.YLimitsLabel.Text = 'y-Axis min/max';
+
+            % Leaving max <= min means AUTO: gen_figure then uses its own
+            % per-metric default, which for every throughput metric is
+            % [0 log2(max(M_ary))]. Both zero (the default) is therefore
+            % "let the figure decide", not "an empty axis".
+            app.YLimMinEditField = uieditfield(app.OutputPanel, 'numeric');
+            app.YLimMinEditField.Position = [102 18 65 22];
+            app.YLimMinEditField.Value = 0;
+            app.YLimMinEditField.Tooltip = 'Lower y limit. If max <= min, the axis is chosen automatically.';
+
+            app.YLimMaxEditField = uieditfield(app.OutputPanel, 'numeric');
+            app.YLimMaxEditField.Position = [177 18 65 22];
+            app.YLimMaxEditField.Value = 0;
+            app.YLimMaxEditField.Tooltip = 'Upper y limit. If max <= min, the axis is chosen automatically.';
 
             %% Status strip
             app.ProgressTrackPanel = uipanel(app.UIFigure);
@@ -1047,6 +1240,11 @@ classdef WirelessSimulator < matlab.apps.AppBase
             app.UIFigure.Visible = 'on';
         end
     end
+end
+
+function close_store(c)
+% Close a store handle: a MySQL or SQLite connection; a text store is a plain struct.
+if ~isstruct(c), close(c); end
 end
 
 function s = formatValueList(vals)

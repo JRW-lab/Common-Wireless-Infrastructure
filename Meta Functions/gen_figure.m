@@ -33,37 +33,13 @@ figures_folder = 'Figures';
 % results loop below indexes it as hash_cell{primvar_sel, sel}.
 hash_list = hash_cell(:);
 hash_list = hash_list(~cellfun(@isempty, hash_list));
-switch save_data.priority
-    case "mysql"
-        if save_data.save_mysql
-            try
-                T = mysql_load(conn, table_name, hash_list);
-            catch
-                conn = mysql_login(conn.DataSource);
-                T = mysql_load(conn, table_name, hash_list);
-            end
-        elseif save_data.save_excel
-            try
-                T = readtable(save_data.excel_path, 'TextType', 'string');
-            catch
-                T = table;
-            end
-        end
-    case "local"
-        if save_data.save_excel
-            try
-                T = readtable(save_data.excel_path, 'TextType', 'string');
-            catch
-                T = table;
-            end
-        elseif save_data.save_mysql
-            try
-                T = mysql_load(conn, table_name, hash_list);
-            catch
-                conn = mysql_login(conn.DataSource);
-                T = mysql_load(conn, table_name, hash_list);
-            end
-        end
+% Every results source, merged; an exploration run's in-memory rows instead (storage steps 7a, 7a.1); reconnect by name
+dbname_gf = "";
+if isfield(save_data,'dbname'), dbname_gf = save_data.dbname; end
+if isfield(save_data,'mem_table')
+    T = save_data.mem_table;
+else
+    T = load_merged(conn, dbname_gf, table_name, hash_list, table, 300);
 end
 
 % Import figure settings
@@ -82,7 +58,11 @@ else
     use_latex = true;
 end
 num_configs = length(configs);
-num_primary = length(primary_vals);
+% ROWS, not axis values. On a secondary (grid) sweep the point list is the
+% flattened primary x secondary product, so it is longer than primary_vals;
+% for an ordinary sweep the two are equal. Taking it from hash_cell is
+% correct in both cases and cannot drift from what sim_head actually built.
+num_primary = size(hash_cell,1);
 
 % Optional fields
 if isfield(figure_data, 'num_trials')
@@ -99,6 +79,13 @@ if isfield(figure_data, 'title_vars')
     title_vars = figure_data.title_vars;
 else
     title_vars = struct();
+end
+secondary_var  = "";
+secondary_vals = [];
+if isfield(figure_data,'secondary_var') && ~isempty(figure_data.secondary_var) ...
+        && isfield(figure_data,'secondary_vals') && ~isempty(figure_data.secondary_vals)
+    secondary_var  = string(figure_data.secondary_var);
+    secondary_vals = figure_data.secondary_vals;
 end
 if isfield(figure_data, 'identifier')
     identifier = figure_data.identifier;
@@ -214,49 +201,10 @@ if ~isfolder(figures_folder)
 end
 
 %% X-Axis label
-x_type = "linear";
-switch primary_var
-    case "EbN0"
-        xlabel_name = "$E_b/N_0$ (dB)";
-    case "vel"
-        xlabel_name = "Vehicular velocity (km/hr)";
-    case "T"
-        primary_vals = primary_vals * 1e6;
-        xlabel_name = "$T$ ($\mu$s)";
-    case "frequency_limit"
-        xlabel_name = "Cutoff Frequency (Hz)";
-    case "max_timing_offset"
-        xlabel_name = "$|\tau_e|$ (in $T_s$)";
-    case "N_iters"
-        xlabel_name = "Number of iterations";
-    case "num_init_frames"
-        xlabel_name = "Number of initialization frames";
-    case "num_pilot_frames_during_init"
-        xlabel_name = "Number of pilot frames during init.";
-    case "shrinkage_alpha"
-        xlabel_name = "$\alpha_{shrinkage}$";
-    case "cov_epsilon"
-        xlabel_name = "$\epsilon$";
-    case "num_pilots"
-        xlabel_name = "Pilots per frame";
-        x_type = "log";
-    case "pilot_energy_alloc"
-        xlabel_name = "$E_{p,total} / E_{frame}$";
-        x_type = "log";
-    case "v_res"
-        xlabel_name = "Resolution of pseudospectrum";
-        x_type = "log";
-    case "M"
-        xlabel_name = "$M$ (num. subcarriers)";
-        x_type = "log";
-    case "N"
-        xlabel_name = "$N$ (num. time syms.)";
-        x_type = "log";
-    case "gamma_p"
-        xlabel_name = "Pilot SNR $\gamma_p$ (dB)";
-    otherwise
-        xlabel_name = string(primary_var);
-end
+% Resolved through sweep_axis_label so the SECONDARY axis of a grid figure
+% gets the identical treatment -- label, log/linear, and any unit scaling.
+[xlabel_name, x_scale, x_type] = sweep_axis_label(primary_var);
+primary_vals = primary_vals * x_scale;
 
 % PER-PROFILE X-SCALE OVERRIDE (2026-09-19). The switch above infers the
 % x-axis scale from primary_var alone, which cannot distinguish two profiles
@@ -274,8 +222,8 @@ switch data_type
     case "Thr"
         loc = "southeast";
         y_type = "linear";
-        ylabel_name = "Throughput (bps/Hz)";
-        ylim_vec = [0 2];
+        ylabel_name = "Uncoded Throughput (bps/Hz)";
+        % ylim set by the throughput rule below, not here
     % Timing metrics are handled generically below (t_<ALG>full /
     % t_<ALG>iter) rather than case-by-case. The old code had a case for
     % t_RXfull ONLY, so t_RXiter -- already offered in the GUI dropdown --
@@ -306,7 +254,7 @@ switch data_type
         else
             ylabel_name = "Coded Throughput, per codeword (bps/Hz)";
         end
-        ylim_vec = [0 2];
+        % ylim_vec = [ylim_vec(1) ylim_vec(2)];
     case "RX_iters"
         y_type = "linear";
         ylabel_name = "Number of RX Iterations";
@@ -314,6 +262,10 @@ switch data_type
         loc = "northwest";
     case "recon_mse"
         ylabel_name = "Channel Estimation MSE";
+    case "recon_mse_r1"
+        % NMSE of the FIRST (pilot-only) estimate, before any data-aided or
+        % decoder-aided round (2026-10-16, see metric_stage.m).
+        ylabel_name = "Channel Estimation MSE, first estimate";
     case "Cap"
         if identifier == "system_name"
             ylim_vec = [min(results_mat(:), [], 'omitnan') max(results_mat(:), [], 'omitnan')];
@@ -322,6 +274,16 @@ switch data_type
         else
             ylabel_name = string(data_type);
         end
+    case "BER_info"
+        ylabel_name = "Coded Info. BER";
+    case "FER_info"
+        ylabel_name = "Coded Info. FER";
+    case "CWER"
+        ylabel_name = "Codeword Error Rate";
+    case "LDPC_conv"
+        ylabel_name = "Codeword Convergence Rate";
+        ylim_vec = [0 1];
+        y_type = "linear";
     otherwise
         ylabel_name = string(data_type);
 end
@@ -383,6 +345,59 @@ end
 
 figure(1);
 clf;
+% GRID SWEEPS (2026-10-09). With a secondary variable the point list is a
+% flattened primary x secondary product, so there is a SURFACE per config
+% rather than a curve. One wireframe mesh per config on shared axes, faces
+% off so they do not occlude one another; the positional-legend rule below
+% applies here exactly as it does to the line plot (one graphics child per
+% config, created in config order).
+if ~isempty(secondary_vals)
+    nP_grid = numel(primary_vals);
+    nS_grid = numel(secondary_vals);
+    if nP_grid < 2 || nS_grid < 2
+        error("gen_figure:gridTooSmall", ...
+            ['A mesh needs at least 2 values on each axis; this profile ' ...
+             'has %d primary and %d secondary.'], nP_grid, nS_grid);
+    end
+    if size(results_mat,1) ~= nP_grid*nS_grid
+        error("gen_figure:gridShapeMismatch", ...
+            ['Point list has %d rows but the grid is %d x %d = %d. The ' ...
+             'flattening order in sim_head and the reshape here must ' ...
+             'agree.'], size(results_mat,1), nP_grid, nS_grid, nP_grid*nS_grid);
+    end
+    [XX, YY] = meshgrid(primary_vals, secondary_vals);   % nS x nP
+    hold on;
+    for sel = 1:num_configs
+        % Rows run PRIMARY-FASTEST (see sim_head), so reshape to (nP x nS)
+        % and transpose to match meshgrid's orientation.
+        ZZ = reshape(results_mat(:, sel), nP_grid, nS_grid).';
+        % SOLID slices (2026-10-09), not the open wireframe this started as.
+        %
+        % EDGES ARE KEPT, in the same colour as the face, and that is not
+        % redundant: a surface face needs all FOUR of its corners to be
+        % non-NaN, so a half-collected grid draws no faces at all. The
+        % edges are what still show a partially-filled sweep -- with a
+        % single populated row (one Eb/N0 slice, which is exactly where
+        % Profile 5 stands today) a face-only surface renders completely
+        % blank. On a full grid the edges simply disappear into the face.
+        %
+        % FaceAlpha is just under 1 so that a lower surface stays visible
+        % through the one above it. With several configs on shared axes,
+        % fully opaque faces hide whichever curve sits underneath -- the
+        % figure would silently show two of three surfaces. Set it to 1 for
+        % a single-config profile, or when occlusion is wanted.
+        surf(XX, YY, ZZ, ...
+            FaceColor=line_colors{sel}, ...
+            FaceAlpha=0.9, ...
+            EdgeColor=line_colors{sel}, ...
+            LineWidth=1.2);
+    end
+    hold off;
+    view(135, 25);
+    % A 3-D axes needs a bigger canvas; the margins themselves are set
+    % once, after labelling, in the MARGINS block below.
+    set(gcf, 'Position', [100 100 820 620]);
+else
 hold on;
 for sel = 1:num_configs
     if ismember(sel, flat_configs)
@@ -419,27 +434,129 @@ if num_trials > 1
     end
 end
 hold off;
+end
 
-ylabel(ylabel_name, Interpreter='latex');
+if ~isempty(secondary_vals)
+    % On a grid the metric moves to Z and the secondary variable takes the
+    % y-axis, labelled through the same resolver as the x-axis.
+    ylabel(sweep_axis_label(secondary_var), Interpreter='latex');
+    zlabel(ylabel_name, Interpreter='latex');
+else
+    ylabel(ylabel_name, Interpreter='latex');
+end
 xlabel(xlabel_name, Interpreter='latex');
 
 if x_type == "log"
     set(gca, 'XScale', 'log');
 end
 if y_type == "log"
-    set(gca, 'YScale', 'log');
+    % The metric lives on Z once there is a secondary axis.
+    if ~isempty(secondary_vals)
+        set(gca, 'ZScale', 'log');
+    else
+        set(gca, 'YScale', 'log');
+    end
 end
 
-if y_type == "log"
-    ylim(ylim_vec);
+% THROUGHPUT Y-AXIS RULE (revised 2026-10-09). Scale to the DATA:
+% [0 max(results)]. The previous rule used [0 log2(max(M_ary))], the
+% UNCODED ceiling, which is right in principle but wastes the plot in
+% practice -- at rate 1/2 every curve tops out at 1.0 against an axis of 2,
+% so half the figure was empty. It also becomes misleading once the code
+% rate is swept, because the reachable ceiling is log2(M)*rate, not
+% log2(M), and that differs per curve.
+%
+% Falls back to 1 if the data is empty or non-positive, so an unpopulated
+% profile still renders a sane axis instead of an invalid one.
+if any(data_type == ["Thr","Thr_coded","Thr_coded_cw"])
+    ymax = max(results_mat(:), [], 'omitnan');
+    if isempty(ymax) || ~isfinite(ymax) || ymax <= 0
+        ymax = 1;
+    end
+    ylim_vec = [0 ymax];
+end
+
+% An explicit y-axis from the GUI wins over every default above. max <= min
+% means the user left it on auto, so the defaults stand.
+if isfield(figure_data,'ylim_user') && numel(figure_data.ylim_user) == 2 ...
+        && figure_data.ylim_user(2) > figure_data.ylim_user(1)
+    ylim_vec = figure_data.ylim_user;
+end
+
+% Same for the legend corner: the GUI's choice overrides the per-metric
+% defaults set in the switch above.
+if isfield(figure_data,'legend_loc_user') && strlength(figure_data.legend_loc_user) > 0
+    loc = figure_data.legend_loc_user;
+elseif ~isempty(secondary_vals) && (loc == "best" || strlength(string(loc)) == 0)
+    % "best" inside a 3-D box lands the legend on top of the surfaces
+    % whatever it picks, because the data fills the frame. Outside is the
+    % only placement that is reliably readable; an explicit GUI choice
+    % still wins over this.
+    loc = "northeastoutside";
+end
+
+% Apply a y-axis only when one is actually usable. An empty or degenerate
+% ylim means "auto", and a lower limit of <= 0 is meaningless on a log
+% axis -- forcing it there produced a broken axis for every log-scale
+% metric once profiles stopped carrying ylim_vec (2026-10-07).
+apply_ylim = ~isempty(ylim_vec) && numel(ylim_vec) == 2 && ylim_vec(2) > ylim_vec(1);
+if apply_ylim && y_type == "log" && ylim_vec(1) <= 0
+    apply_ylim = false;
+end
+if apply_ylim
+    if ~isempty(secondary_vals)
+        zlim(ylim_vec);
+    else
+        ylim(ylim_vec);
+    end
 end
 xlim([primary_vals(1) primary_vals(end)]);
 xticks(primary_vals);
+if ~isempty(secondary_vals)
+    ylim([secondary_vals(1) secondary_vals(end)]);
+    yticks(secondary_vals);
+end
 grid on;
-legend(legend_vec, Location=loc, Interpreter='latex');
+% A ONE-CONFIG FIGURE GETS NO LEGEND (2026-10-09). A legend exists to tell
+% curves apart; with a single curve it only repeats what the axes already
+% say and covers part of the data doing it. Keyed on the number of configs
+% rather than on the number of curves actually drawn, so a profile that is
+% merely UNCOLLECTED still renders the same furniture it will have once it
+% has data -- a legend that appears and disappears as frames arrive would
+% make iterative rendering flicker.
+if num_configs > 1
+    legend(legend_vec, Location=loc, Interpreter='latex');
+end
 set(gca, 'FontSize', font_val);
 set(gca, 'Box', 'on');
 set(gca, 'LineWidth', 1.2);
+
+% MARGINS. Run AFTER every label and the legend exist, because TightInset
+% measures what is currently drawn -- asking before the labels are set
+% reports the margin an unlabelled axes needs, which is the mistake that
+% left "Coded Throughput, per codeword (bps/Hz)" clipped at the figure edge.
+%
+% A floor is applied on top of TightInset rather than trusting it alone: it
+% does not account for the ROTATED tick labels a 3-D view produces, which is
+% what clipped the x-label on the first mesh renders. 3-D needs the larger
+% floor because it hangs both an x- and a z-label outside the plot box.
+%
+% 2-D DELIBERATELY ENLARGES THE CANVAS RATHER THAN TIGHTENING THE MARGINS.
+% Margins are a FRACTION of figure size while the label is a fixed point
+% size, so a bigger canvas buys the label more absolute room; shrinking
+% LooseInset instead just lets the axes expand into the space the label
+% needed, which made the clipping worse. TightInset is not a reliable
+% backstop here either -- it under-measures rotated text drawn through the
+% LaTeX interpreter, which is exactly what a long y-label like
+% "Coded Throughput, per codeword (bps/Hz)" is.
+if isempty(secondary_vals)
+    set(gcf, 'Position', [100 100 760 560]);
+end
+drawnow;
+ax_m = gca;
+if ~isempty(secondary_vals)
+    ax_m.LooseInset = max(ax_m.TightInset, [0.13 0.13 0.07 0.06]);
+end
 
 % Optional title
 if render_title
@@ -475,4 +592,90 @@ if save_sel
     filename = fullfile(figures_folder, data_type, string(primary_var), ...
         sprintf('%s_%s.png', data_type, timestamp));
     saveas(gcf, filename);
+end
+
+end   % gen_figure -- local functions follow
+
+function [name, scale, ax_type] = sweep_axis_label(v)
+% SWEEP_AXIS_LABEL  Display name, unit scaling and log/linear for a swept
+% variable.
+%
+%   Factored out of gen_figure's x-axis switch on 2026-10-09 so that the
+%   SECONDARY axis of a grid figure is labelled by the same rules as the
+%   primary one. Returning the scale rather than mutating the caller's
+%   values keeps it usable for either axis.
+%
+%   OUTPUTS:
+%     name:    LaTeX display name
+%     scale:   multiply the axis values by this (unit conversion)
+%     ax_type: "linear" or "log"
+
+scale   = 1;
+ax_type = "linear";
+switch string(v)
+    case "EbN0"
+        name = "$E_b/N_0$ (dB)";
+    case "vel"
+        name = "Vehicular velocity (km/hr)";
+    case "T"
+        scale = 1e6;
+        name = "$T$ ($\mu$s)";
+    case "frequency_limit"
+        name = "Cutoff Frequency (Hz)";
+    case "max_timing_offset"
+        name = "$|\tau_e|$ (in $T_s$)";
+    case "N_iters"
+        name = "Number of iterations";
+    case "num_init_frames"
+        name = "Number of initialization frames";
+    case "num_pilot_frames_during_init"
+        name = "Number of pilot frames during init.";
+    case "shrinkage_alpha"
+        name = "$\alpha_{shrinkage}$";
+    case "cov_epsilon"
+        name = "$\epsilon$";
+    case "num_pilots"
+        name = "Pilots per frame";
+        ax_type = "log";
+    case "pilot_energy_alloc"
+        name = "$E_{p,total} / E_{frame}$";
+        ax_type = "log";
+    case "v_res"
+        name = "Resolution of pseudospectrum";
+        ax_type = "log";
+    case "M"
+        name = "$M$ (num. subcarriers)";
+        ax_type = "log";
+    case "N"
+        name = "$N$ (num. time syms.)";
+        ax_type = "log";
+    case "gamma_p"
+        name = "Pilot SNR $\gamma_{p}$ (dB)";
+    % LDPC sweep variables (the ldpc_* aliases resolve_ldpc_settings
+    % exposes). Added with the grid feature: before this they fell through
+    % to the default and an axis simply read "ldpc_rate".
+    case "ldpc_rate"
+        name = "Code rate $R$";
+    case "ldpc_N"
+        name = "Codeword length $N_c$";
+        ax_type = "log";
+    case "ldpc_bp_iters"
+        name = "BP iterations";
+    case "ldpc_colweight"
+        name = "Column weight $w_c$";
+    % Dictionary oversampling. Both are swept in doubling sequences, so a
+    % log axis is the honest one: on a linear axis the 8-to-16 step and the
+    % 32-to-64 step would look wildly different while costing the same
+    % factor of search grid.
+    case "PiTau"
+        name = "$\Pi_\tau$ (delay grid oversampling)";
+        ax_type = "log";
+    case "PiNu"
+        name = "$\Pi_\nu$ (Doppler grid oversampling)";
+        ax_type = "log";
+    case "NGS"
+        name = "Gauss-Seidel sweeps $N_{GS}$";
+    otherwise
+        name = string(v);
+end
 end

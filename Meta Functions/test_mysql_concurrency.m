@@ -1,34 +1,23 @@
 function test_mysql_concurrency(varargin)
-%TEST_MYSQL_CONCURRENCY  Regression test for mysql_write's lost-update race.
+% TEST_MYSQL_CONCURRENCY Regression test for mysql_write's lost-update race.
 %
-%   test_mysql_concurrency              run both scenarios (default)
-%   test_mysql_concurrency('nBatches',N)  batches per worker (default 150)
-%   test_mysql_concurrency('dbname',D)    database (default comm_database)
+%   test_mysql_concurrency
+%   test_mysql_concurrency('nBatches',N)  batches per worker, default 150
+%   test_mysql_concurrency('dbname',D)    database, default comm_database
 %
-%   WHY THIS EXISTS AS A TEST AND NOT A NOTE. The bug it guards is
-%   invisible in normal use: both workers complete, both report success,
-%   nothing errors, nothing warns -- and a chunk of the frames is simply
-%   not there. A rare silent corruption is worse than a frequent one,
-%   because nobody goes looking for it. So the test forces the collision
-%   instead of hoping for it: two real OS processes, deliberately the SAME
-%   point, one frame per write, no pacing.
+%   The race is invisible in normal use: both workers report success,
+%   nothing errors, and a chunk of the frames is simply absent. So the
+%   test forces the collision rather than waiting for it - two real OS
+%   processes, deliberately the same point, one frame per write.
 %
-%   MEASURED ON THE PRE-FIX CODE (2026-10-05, 150 batches per worker):
-%     steady-state  172 of 300 frames recorded -- 42.7% lost, silently.
-%                   aux total_bits 1530 of 3000.
-%     create-time   both workers INSERTed, the loser died on duplicate key
-%                   and took all 150 of its frames with it.
-%   Post-fix both scenarios are exact. If this test ever starts failing,
-%   the compare-and-swap guard in mysql_write has been weakened -- do not
-%   "fix" it by loosening the assertion.
+%   On the pre-fix code (150 batches per worker) the steady-state scenario
+%   recorded 172 of 300 frames, losing 42.7% silently, and at create time
+%   both workers INSERTed with the loser dying on duplicate key. Post-fix
+%   both are exact. A failure here means the compare-and-swap guard in
+%   mysql_write has been weakened; do not loosen the assertion to match.
 %
-%   The assertions are arithmetic and exact (frames_simulated must equal
-%   the number of batches actually written, and the additive counters must
-%   equal their known sums), so this is not a judgement call about whether
-%   a number looks plausible.
-%
-%   Runs entirely against a scratch table that it creates and drops.
-%   sim_lookup is never touched.
+%   Assertions are exact arithmetic, not plausibility checks. Runs against
+%   a scratch table it creates and drops; sim_lookup is never touched.
 %
 %   RUN IT FROM A PROJECT ROOT, not from this folder. mysql_login resolves
 %   credentials relative to the working directory, so from inside the

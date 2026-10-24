@@ -16,7 +16,22 @@ Shared MATLAB functions used across multiple wireless communications simulation 
 | `mysql_set.m` / `mysql_unset.m` | Set/clear inter-process flags |
 | `connectWithRetry.m` | Retry DB connection up to 50 times with 30s wait |
 | `addMysqlJarOnce.m` | Add MySQL JDBC JAR to Java classpath once |
-| `local_write.m` | Excel read/write fallback with weighted-averaging |
+| `mysql_load_resilient.m` | `mysql_load` that waits out a lost connection |
+
+### Result stores
+
+Each computer writes to its own primary store and, optionally, mirrors; readers merge every registered source by `param_hash`. The registry is the consuming project's `db_sources.json`, and a computer's store list is `Results/<COMPUTER>/stores.json` (both machine-specific and gitignored there).
+
+| Function | Purpose |
+|----------|---------|
+| `store_adapter.m` | One interface over the store kinds: MySQL, SQLite (Database Toolbox) and text files (no toolbox); Excel is a mirror only |
+| `results_write.m` | Write one batch to this computer's primary store, then its mirrors |
+| `load_merged.m` | Read every registered source, merged by `param_hash` |
+| `db_registry.m` / `db_sources.m` / `db_target.m` | Read the registry; list the sources; this computer's write target |
+| `machine_stores.m` / `store_connect.m` | A computer's stores in priority order; open its primary |
+| `storage_view.m` / `storage_apply.m` / `store_flush.m` | The GUI's Storage panel: list, change, refresh Excel mirrors |
+| `store_check.m` / `store_resync.m` / `store_status.m` | Compare a mirror to its primary, rebuild it, track staleness |
+| `host_id.m` | This computer's registry name (`CWS_HOST`, else `COMPUTERNAME`, else the host name) |
 
 ### Hashing
 
@@ -45,7 +60,7 @@ No credentials are stored in this repository. The first time a project enables M
 
 1. It checks whether a MySQL server is running on `localhost:3306`.
 2. If found, it asks for that server's password (assumes the `root` user).
-3. If not found, it asks for a remote host to connect to instead - or you can just press Enter to skip and use local Excel storage only.
+3. If not found, it asks for a remote host to connect to instead - or you can press Enter to skip MySQL (the consuming project then uses a local file store).
 4. Once a connection succeeds, the credentials are cached in `mysql_local.json` at the consuming project's root (already covered by `.gitignore` - never committed) and reused silently on every run after that.
 5. The target database schema (e.g. `comm_database`) is created automatically if it doesn't already exist.
 

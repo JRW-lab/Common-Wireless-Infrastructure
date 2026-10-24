@@ -7,8 +7,11 @@ port = 3306;
 % cached locally afterward). Returns [] if MySQL is disabled.
 creds = get_mysql_credentials();
 if isempty(creds)
-    error("MySQL is not configured for this project - delete mysql_local.json to re-run setup, or disable 'Enable MySQL' to use local Excel storage only.");
+    error("MySQL is not configured for this project - run get_mysql_credentials from the project root, or remove mysql_local.json and db_sources.json so the next run sets up a local file store.");
 end
+
+% The results registry says which server holds this database (db_creds)
+creds = db_creds(dbname, creds);
 
 % Reuse a live connection across calls in this MATLAB session instead of
 % opening a fresh TCP + auth handshake (plus, on servers without
@@ -43,6 +46,13 @@ end
 % cache exists to avoid. Validating is far cheaper than what it saves.
 % ---------------------------------------------------------------------
 persistent cached_conn cached_dbname
+% Drop a deleted handle before isopen() is reached: mysql_load's self-heal
+% closes the connection it replaces, which is usually this cached object,
+% and isopen() on a deleted handle throws rather than returning false.
+if ~isempty(cached_conn) && ~isvalid(cached_conn)
+    cached_conn = [];
+    cached_dbname = [];
+end
 if ~isempty(cached_conn) && isequal(cached_dbname, dbname) && isopen(cached_conn)
     if mysql_conn_is_live(cached_conn)
         conn = cached_conn;
